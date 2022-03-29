@@ -121,14 +121,17 @@ class DGSQP(AbstractSolver):
             plt.ion()
             self.fig = plt.figure(figsize=(10,5))
             self.ax_xy = self.fig.add_subplot(1,2,1)
+            self.ax_a = self.fig.add_subplot(2,2,2)
+            self.ax_s = self.fig.add_subplot(2,2,4)
             # self.joint_dynamics.dynamics_models[0].track.remove_phase_out()
             self.joint_dynamics.dynamics_models[0].track.plot_map(self.ax_xy, close_loop=False)
-            self.l1_xy, self.l2_xy = self.ax_xy.plot([], [], 'bo', [], [], 'go')
-            self.ax_a = self.fig.add_subplot(2,2,2)
-            self.l1_a, self.l2_a = self.ax_a.plot([], [], '-bo', [], [], '-go')
+            self.colors = ['b', 'g', 'r', 'm', 'c']
+            self.l_xy, self.l_a, self.l_s = [], [], []
+            for i in range(self.M):
+                self.l_xy.append(self.ax_xy.plot([], [], f'{self.colors[i]}o')[0])
+                self.l_a.append(self.ax_a.plot([], [], f'-{self.colors[i]}o')[0])
+                self.l_s.append(self.ax_s.plot([], [], f'-{self.colors[i]}o')[0])
             self.ax_a.set_ylabel('accel')
-            self.ax_s = self.fig.add_subplot(2,2,4)
-            self.l1_s, self.l2_s = self.ax_s.plot([], [], '-bo', [], [], '-go')
             self.ax_s.set_ylabel('steering')
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
@@ -1209,23 +1212,23 @@ class DGSQP(AbstractSolver):
             ua_bar.append(u[si:ei].reshape((self.N, self.num_ua_d[a])))
         u_bar = np.hstack(ua_bar)
         if not self.local_pos:
-            self.l1_xy.set_data(q_bar[:,0], q_bar[:,1])
-            self.l2_xy.set_data(q_bar[:,0+self.joint_dynamics.dynamics_models[0].n_q], q_bar[:,1+self.joint_dynamics.dynamics_models[0].n_q])
+            for i in range(self.M):
+                self.l_xy[i].set_data(q_bar[:,0+int(np.sum(self.num_qa_d[:i]))], q_bar[:,1+int(np.sum(self.num_qa_d[:i]))])
         else:
             raise NotImplementedError('Conversion from local to global pos has not been implemented for debug plot')
         self.ax_xy.set_aspect('equal')
         J = self.f_J(u, x0, up)
-        self.ax_xy.set_title(f'ego cost: {J[0]}, tar cost: {J[1]}')
-        self.l1_a.set_data(np.arange(self.N), u_bar[:,0])
-        self.l1_s.set_data(np.arange(self.N), u_bar[:,1])
-        self.l2_a.set_data(np.arange(self.N), u_bar[:,2])
-        self.l2_s.set_data(np.arange(self.N), u_bar[:,3])
+        self.ax_xy.set_title(str(J))
+        for i in range(self.M):
+            self.l_a[i].set_data(np.arange(self.N), u_bar[:,0+int(np.sum(self.num_ua_d[:i]))])
+            self.l_s[i].set_data(np.arange(self.N), u_bar[:,1+int(np.sum(self.num_ua_d[:i]))])
         self.ax_a.relim()
         self.ax_a.autoscale_view()
         self.ax_s.relim()
         self.ax_s.autoscale_view()
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
+
 
 if __name__ == '__main__':
     pass
