@@ -15,7 +15,8 @@ Dependencies:
 - `osqp`
 - `matplotlib`
 - `pyqtgraph`
-  
+
+The following command will install the Python package `DGSQP`:
 ```
 python3 -m pip install -e .
 ```

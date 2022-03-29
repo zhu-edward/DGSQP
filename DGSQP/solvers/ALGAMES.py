@@ -202,12 +202,6 @@ class ALGAMES(AbstractSolver):
         q_bar = ca.DM(q_bar.T)
         u_bar = ca.DM(u_bar.T)
         
-        # if self.l_ws is None or self.m_ws is None:
-        #     lam_bar = ca.DM.zeros(self.n_c)
-        #     mu_bar = ca.DM.zeros((self.n_q*self.N, self.M))
-        # else:
-        #     lam_bar = ca.DM(self.l_ws)
-        #     mu_bar = ca.DM(self.m_ws)
         lam_bar = ca.DM.zeros(self.n_c)
         mu_bar = ca.DM.zeros((self.n_q*self.N, self.M))
         

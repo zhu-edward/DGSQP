@@ -55,7 +55,6 @@ class DGSQP(AbstractSolver):
             jac_opts = dict(enable_fd=False, enable_jacobian=False, enable_forward=False, enable_reverse=False)
         else:
             jac_opts = dict()
-        # jac_opts = dict(enable_fd=True, enable_forward=False, enable_reverse=False, enable_jacobian=False)
 
         if self.code_gen:
             if self.jit:
@@ -318,20 +317,6 @@ class DGSQP(AbstractSolver):
                 break
             dl = l_hat - l
 
-            # print(np.amax(g_i))
-            # n = Q_i @ du + G_i.T @ dl + d_i
-            # A = np.hstack((Q_bar, G_i.T))
-            # B = np.hstack((Q_i, G_i.T))
-            # d = np.concatenate((du, dl))
-            # print(-d.T @ A.T @ B @ d)
-
-            # a = d_i.T @ np.hstack((Q_i, G_i.T)) @ np.concatenate((du, dl))
-            # b = g_i.dot(l)*(l.reshape((-1,1)).T @ G_i @ du + g_i.dot(dl))
-  
-            # print(np.linalg.norm(Q_sqp @ du + G_i.T @ dl + d_i, ord=np.inf))
-            # print(a+b)
-            # pdb.set_trace()
-
             ls = True
             thresh = 0
             s = np.minimum(thresh, g_i)
@@ -433,12 +418,6 @@ class DGSQP(AbstractSolver):
         print(f'Solve time: {solve_dur}')
         J = self.f_J(u, x0, up)
         print(f'ego cost: {J[0]}, tar cost: {J[1]}')
-
-        # active_idxs = [np.where(l[self.Cbr_v_idxs[a]] > 1e-7)[0] for a in range(self.M)]
-        # A = [self.f_Du_Cbr[a](u, x0, up).toarray()[active_idxs[a]] for a in range(self.M)]
-        # N = [sp.linalg.null_space(A[a]) for a in range(self.M)]
-        # Luu = [self.f_Duu_L[a](u, l, x0, up)[a] for a in range(self.M)]
-        # pdb.set_trace()
 
         solve_info['time'] = solve_dur
         solve_info['num_iters'] = sqp_it
@@ -813,19 +792,6 @@ class DGSQP(AbstractSolver):
         Q = ca.vertcat(*[Duu_J[a][int(np.sum(self.num_ua_el[:a])):int(np.sum(self.num_ua_el[:a+1])),:] for a in range(self.M)]) + lDuu_C
         self.f_Q = ca.Function('f_Q', in_args, [Q], self.options)
 
-        # Best response specific constraint functions
-        # Cbr = [[[] for _ in range(self.N+1)] for _ in range(self.M)]
-        # for k in range(self.N+1):
-        #     for a in range(self.M):
-        #         Cbr[a][k] = Cu[k][self.Cbr_k_idxs[a][k]]
-        #         self.n_cbr[a][k] = Cbr[a][k].shape[0]
-        # self.f_Cbr = [ca.Function(f'f_C{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], Cbr[a]) for a in range(self.M)]
-
-        # Duk_C = [ca.jacobian(ca.vertcat(*Cu), ca.vertcat(*uk_ph[:-1]))]
-        # Du_Cbr = [ca.jacobian(ca.vertcat(*Cbr[a]), ua_ph[a]) for a in range(self.M)]
-        # self.f_Duk_C = ca.Function('f_Duk_C', [ca.vertcat(*uk_ph[:-1]), xr_ph[0], uk_ph[-1]], Duk_C)
-        # self.f_Du_Cbr = [ca.Function(f'f_Du_Cbr{a}', [ca.vertcat(*ua_ph), xr_ph[0], uk_ph[-1]], [Du_Cbr[a]]) for a in range(self.M)]
-
         # Symbolic Hessian of Lagrangian
         L = [Ju[a] + ca.dot(l_ph, ca.vertcat(*Cu)) for a in range(self.M)]
         Du_L = [[ca.jacobian(L[a], ua_ph[b]).T for b in range(self.M)] for a in range(self.M)]
@@ -925,7 +891,6 @@ class DGSQP(AbstractSolver):
                 print(f'- Executing "{command}"')
             pdb.set_trace()
             os.system(command)
-            # pdb.set_trace()
             # Swtich back to working directory
             os.chdir(cur_dir)
             install_dir = self.install()
@@ -1261,137 +1226,6 @@ class DGSQP(AbstractSolver):
         self.ax_s.autoscale_view()
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
-
-    # def _filter_line_search(self, u, du, l, dl, F, cost_fn, constr_fn):
-    #     line_search_converged = False
-    #     beta = 1e-5
-    #     C_min = 1e-6
-        
-    #     C = np.mean(np.maximum(constr_fn(u), 0))
-
-    #     alpha = 1.0
-    #     for k in range(self.line_search_iters):
-    #         u_trial = u + alpha*du
-    #         l_trial = l + alpha*dl
-
-    #         J_trial = list(map(float, cost_fn(u_trial))) # Agent costs
-    #         C_trial = np.mean(np.maximum(constr_fn(u_trial), 0)) # Constraint violation
-    #         f_trial = np.array(J_trial + [C_trial])
-
-    #         if self.verbose:
-    #                 print(f'- Line search iteration: {k} | a: {alpha:.4e}')
-    #                 print(f_trial)
-    #                 print(F)
-
-    #         trial_accepted = False
-    #         for f in F:
-    #             if C <= C_min:
-    #                 if np.any(f_trial[:-1] <= f[:-1] - beta*C):
-    #                     trial_accepted = True
-    #                     break
-    #             else:
-    #                 if np.any(f_trial <= f - beta*C):
-    #                     trial_accepted = True
-    #                     break
-            
-    #         if trial_accepted:
-    #             # Remove dominated points
-    #             idx = 0
-    #             while idx < len(F):
-    #                 if np.all(f_trial < F[idx]):
-    #                     F.pop(idx)
-    #                 else:
-    #                     idx += 1
-    #             F.append(f_trial)
-    #             line_search_converged = True
-    #             break 
-    #         else:
-    #             alpha *= self.tau
-            
-    #     if not line_search_converged:
-    #         if self.verbose:
-    #             print('- Max line search iterations reached, did not converge')
-
-    #     return u_trial, l_trial, F
-
-    # def _hybrid_line_search(self, u, du, l, dl, F, merit_fn, d_merit_fn, cost_fn, constr_fn):
-    #     trial_accepted = False
-        
-    #     C_min = 1e-6
-    #     g = 1e-5
-    #     s_mer = 2.3
-    #     s_con = 1.1
-    #     delta = 1
-        
-    #     C = np.mean(np.maximum(constr_fn(u), 0))
-    #     phi = merit_fn(u, l)
-    #     dphi = d_merit_fn(u, du, l, dl)
-        
-    #     alpha = 1.0
-    #     for k in range(self.line_search_iters):
-    #         u_trial = u + alpha*du
-    #         l_trial = l + alpha*dl
-
-    #         J_trial = list(map(float, cost_fn(u_trial))) # Agent costs
-    #         C_trial = np.mean(np.maximum(constr_fn(u_trial), 0)) # Constraint violation
-    #         f_trial = np.array(J_trial + [C_trial])
-
-    #         print(f_trial)
-    #         print(F)
-    #         filter_accepted = True
-    #         for f in F:
-    #             if np.all(f_trial >= f - g*C):
-    #                 if self.verbose:
-    #                     print('Rejected by filter')
-    #                 filter_accepted = False
-    #                 break
-    #         if filter_accepted and self.verbose:
-    #                 print('Accepted by filter')
-            
-    #         if filter_accepted:
-    #             if self.verbose:
-    #                 print(C)
-    #                 print(dphi)
-    #                 print(alpha*np.power(-dphi, s_mer))
-    #                 print(delta*np.power(C, s_con))
-    #             if C <= C_min and dphi < 0 and alpha*np.power(-dphi, s_mer) > delta*np.power(C, s_con):
-    #                 if self.verbose:
-    #                     print('Case 1')
-    #                 phi_trial = merit_fn(u_trial, l_trial)
-    #                 if phi_trial <= phi + self.beta*alpha*dphi:
-    #                     if self.verbose:
-    #                         print('Trial accepted via line search')
-    #                     trial_accepted = True
-    #             else:
-    #                 if self.verbose:
-    #                     print('Case 2')
-    #                 for f in F:
-    #                     if np.any(f_trial <= f - g*C):
-    #                         if self.verbose:
-    #                             print('Trial accepted via filter')
-    #                         trial_accepted = True
-    #                         break
-
-    #         if filter_accepted and trial_accepted:
-    #             # Remove dominated points
-    #             idx = 0
-    #             while idx < len(F):
-    #                 if np.all(f_trial <= F[idx]):
-    #                     F.pop(idx)
-    #                 else:
-    #                     idx += 1
-    #             F.append(f_trial)
-            
-    #         if trial_accepted:
-    #             break
-    #         else:
-    #             alpha *= self.tau
-            
-    #     if not trial_accepted:
-    #         if self.verbose:
-    #             print('- Max line search iterations reached, did not converge')
-
-    #     return u_trial, l_trial, F
 
 if __name__ == '__main__':
     pass

@@ -199,15 +199,6 @@ class IBR(AbstractSolver):
         x0 = self.joint_dynamics.state2q(states)
         up = copy.copy(self.u_prev)
         u_im1 = copy.copy(u_i)
-        
-        # if self.use_ps:
-        #     G_i = []
-        #     for a in range(self.M):
-        #         if a == 0:
-        #             g = np.zeros(self.f_Dua_Lps[a].numel_in(3))
-        #             G_i.append(self.f_Dua_Lps[a](np.concatenate(u_i), l_i[a], np.concatenate(u_im1), g, x0, up))
-        #         else:
-        #             G_i.append(self.f_Dua_Lbr[a](np.concatenate(u_i), l_i[a], x0, up))
 
         if self.verbose:
             J = self.f_J(np.concatenate(u_i), x0, up)
@@ -227,29 +218,7 @@ class IBR(AbstractSolver):
             if self.verbose:
                 print('===================================================')
                 print(f'IBR iteration: {ibr_it}')
-            
-            # Convergence test
-            # xtol = self.p_tol*(1+np.linalg.norm(u))
-            # ltol = self.d_tol*(1+np.linalg.norm(l))
-            # xtol = self.p_tol
-            # ltol = self.d_tol
 
-            # if self.use_ps:
-            #     c_i = self._evaluate_ps(u_i, l_i, x0, up)
-            #     p_feas = np.amax(np.maximum(c_i, np.zeros(np.sum(self.n_c))))
-            #     comp = np.amax([np.linalg.norm(np.multiply(c_i, l_i[a]), np.inf) for a in range(self.M)])
-            # else:
-            #     c_i, G_i = self._evaluate_br(u_i, l_i, x0, up)
-            #     p_feas = np.amax([np.amax(np.maximum(c_i[a], np.zeros(np.sum(self.n_cbr[a])))) for a in range(self.M)])
-            #     comp = np.amax([np.linalg.norm(np.multiply(c_i[a], l_i[a]), np.inf) for a in range(self.M)])
-            # stat = np.linalg.norm(np.concatenate(G_i), np.inf)
-            # cond = {'p_feas': p_feas, 'comp': comp, 'stat': stat}
-            # if self.verbose:
-            #     print(f'p feas: {p_feas:.4e} | comp: {comp:.4e} | stat: {stat:.4e}')
-            # if p_feas < xtol and comp < ltol and stat < ltol:
-            #     ibr_converged = True
-            #     if self.verbose: print('IBR converged via optimality conditions')
-            #     break
             cond = None
 
             for a in range(self.M):
@@ -262,40 +231,8 @@ class IBR(AbstractSolver):
                         if b != a:
                             uo = np.concatenate([u_i[c] for c in range(self.M) if c != b])
                             try:
-                                # Duo_ubr.append(self.f_Duo_ubr[b](u_i[b], l_i[b][self.Cbr_v_idxs[b]], uo, x0, up).toarray())
                                 Duo_ubr = self.f_Duo_ubr[b](u_i[b], l_i[b], uo, x0, up).toarray()
                                 Duo_ubr_v.append(Duo_ubr.ravel(order='F'))
-                                # Duo_ubr_v.append(Duo_ubr.ravel())
-                                # rng = np.random.default_rng()
-                                # for i in range(3):
-                                #     p = np.concatenate((x0, up, u_i[a]))
-                                #     solver_args = {}
-                                #     solver_args['x0'] = u_i[b]
-                                #     solver_args['lam_g0'] = l_i[b]
-                                #     solver_args['lbx'] = -np.inf*np.ones(self.N*self.num_ua_d[b])
-                                #     solver_args['ubx'] = np.inf*np.ones(self.N*self.num_ua_d[b])
-                                #     solver_args['lbg'] = -np.inf*np.ones(np.sum(self.n_cbr[b]))
-                                #     solver_args['ubg'] = np.zeros(np.sum(self.n_cbr[b]))
-                                #     solver_args['p'] = p
-                                #     sol = self.br_solvers[b](**solver_args)
-                                #     u_1 = sol['x'].toarray().squeeze()
-
-                                #     d = 2*rng.random(len(u_i[a]))-1 # Sample perturbation
-                                #     d = 1e-4*d/np.linalg.norm(d)
-                                #     p = np.concatenate((x0, up, u_i[a]+d))
-                                #     solver_args = {}
-                                #     solver_args['x0'] = u_i[b]
-                                #     solver_args['lam_g0'] = l_i[b]
-                                #     solver_args['lbx'] = -np.inf*np.ones(self.N*self.num_ua_d[b])
-                                #     solver_args['ubx'] = np.inf*np.ones(self.N*self.num_ua_d[b])
-                                #     solver_args['lbg'] = -np.inf*np.ones(np.sum(self.n_cbr[b]))
-                                #     solver_args['ubg'] = np.zeros(np.sum(self.n_cbr[b]))
-                                #     solver_args['p'] = p
-                                #     sol = self.br_solvers[b](**solver_args)
-                                #     u_2 = sol['x'].toarray().squeeze()
-
-                                #     print((u_2 - u_1)/1e-4)
-                                #     print(Duo_ubr @ d/1e-4)
 
                             except Exception as e:
                                 print(e)
@@ -608,8 +545,7 @@ class IBR(AbstractSolver):
         else:
             self.code_gen_opts = dict(jit=False)
 
-        ipopt_opts = dict(max_iter=200, 
-                          linear_solver='ma27',
+        ipopt_opts = dict(max_iter=200,
                           mu_strategy='adaptive',
                           warm_start_init_point='yes')
         solver_opts = dict(error_on_fail=False, 
@@ -693,14 +629,6 @@ class IBR(AbstractSolver):
 
         if self.code_gen and not self.jit:
             generator = ca.CodeGenerator(self.c_file_name)
-            # generator.add(self.f_state_rollout)
-            # generator.add(self.f_J)
-            # generator.add(self.f_C)
-            # generator.add(self.f_Du_C)
-            # for a in range(self.M):
-            #     generator.add(self.f_Du_J[a])
-            #     generator.add(self.f_Du_L[a])
-            #     generator.add(self.f_Duu_L[a])
 
             # Set up paths
             cur_dir = pathlib.Path.cwd()
@@ -734,17 +662,6 @@ class IBR(AbstractSolver):
             solver_path = str(pathlib.Path(self.solver_dir, self.so_file_name).expanduser())
         if self.verbose:
             print('- Loading solver from %s' % solver_path)
-        # self.f_state_rollout = ca.external('f_state_rollout', solver_path)
-        # self.f_J = ca.external('f_J', solver_path)
-        # self.f_C = ca.external('f_C', solver_path)
-        # self.f_Du_C = ca.external('f_Du_C', solver_path)
-        # self.f_Du_J = [None for _ in range(self.M)]
-        # self.f_Du_L = [None for _ in range(self.M)]
-        # self.f_Duu_L = [None for _ in range(self.M)]
-        # for a in range(self.M):
-        #     self.f_Du_J[a] = ca.external(f'f_Du_J{a}', solver_path)
-        #     self.f_Du_L[a] = ca.external(f'f_Du_L{a}', solver_path)
-        #     self.f_Duu_L[a] = ca.external(f'f_Duu_L{a}', solver_path)
 
     def get_prediction(self) -> List[VehiclePrediction]:
         return self.state_input_predictions
