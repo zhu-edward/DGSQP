@@ -445,7 +445,7 @@ class ALGAMES(AbstractSolver):
         print(f'Solve iters: {i+1}')
         print(f'Solve time: {solve_dur}')
         J = self.f_J(*ca.horzsplit(q_bar, 1), *ca.horzsplit(u_bar, 1))
-        print(f'ego cost: {J[0]}, tar cost: {J[1]}')
+        print('Cost: ' + str(J))
 
         solve_info['time'] = solve_dur
         solve_info['num_iters'] = i+1

@@ -271,7 +271,7 @@ class DGSQP(AbstractSolver):
             sqp_it_start = datetime.now()
             if self.verbose:
                 print('===================================================')
-                print(f'SQGAMES iteration: {sqp_it}')
+                print(f'DGSQP iteration: {sqp_it}')
 
             u_im1 = copy.copy(u)
             l_im1 = copy.copy(l)
@@ -288,12 +288,12 @@ class DGSQP(AbstractSolver):
             stat = np.linalg.norm(d_i, ord=np.inf)
             cond = {'p_feas': p_feas, 'comp': comp, 'stat': stat}
             if self.verbose:
-                print(f'SQP iteration {sqp_it}')
+                print(f'DGSQP iteration {sqp_it}')
                 print(f'p feas: {p_feas:.4e} | comp: {comp:.4e} | stat: {stat:.4e}')
             if stat > 1e5:
                 sqp_it_dur = (datetime.now()-sqp_it_start).total_seconds()
                 iter_data.append(dict(cond=cond, u_sol=u, l_sol=l, qp_solves=qp_solves, it_time=sqp_it_dur))
-                if self.verbose: print('SQP diverged')
+                if self.verbose: print('DGSQP diverged')
                 msg = 'diverged'
                 sqp_converged = False
                 break
@@ -302,7 +302,7 @@ class DGSQP(AbstractSolver):
                 iter_data.append(dict(cond=cond, u_sol=u, l_sol=l, qp_solves=qp_solves, it_time=sqp_it_dur))
                 sqp_converged = True
                 msg = 'conv_abs_tol'
-                if self.verbose: print('SQP converged via optimality conditions')
+                if self.verbose: print('DGSQP converged via optimality conditions')
                 break
             
             # Compute SQP primal dual step
@@ -374,8 +374,8 @@ class DGSQP(AbstractSolver):
             sqp_it_dur = (datetime.now()-sqp_it_start).total_seconds()
             if self.verbose:
                 J = self.f_J(u, x0, up)
-                print(f'ego cost: {J[0]}, tar cost: {J[1]}')
-                print(f'SQP iteration {sqp_it} time: {sqp_it_dur}')
+                print('Cost: ' + str(J))
+                print(f'DGSQP iteration {sqp_it} time: {sqp_it_dur}')
                 print('===================================================')
             
             iter_data.append(dict(cond=cond, u_sol=u, l_sol=l, qp_solves=qp_solves, it_time=sqp_it_dur))
@@ -386,7 +386,7 @@ class DGSQP(AbstractSolver):
                 if rel_tol_its >= self.rel_tol_req and p_feas < xtol:
                     sqp_converged = True
                     msg = 'conv_rel_tol'
-                    if self.verbose: print('SQP converged via relative tolerance')
+                    if self.verbose: print('DGSQP converged via relative tolerance')
                     break
             else:
                 rel_tol_its = 0
@@ -400,7 +400,7 @@ class DGSQP(AbstractSolver):
             if sqp_it >= self.sqp_iters:
                 msg = 'max_it'
                 sqp_converged = False
-                if self.verbose: print('Max SQP iterations reached')
+                if self.verbose: print('Max DGSQP iterations reached')
                 break
         
         x_bar = np.array(self.evaluate_dynamics(u, x0)).squeeze()
@@ -420,7 +420,7 @@ class DGSQP(AbstractSolver):
         print(f'Solve iters: {sqp_it}')
         print(f'Solve time: {solve_dur}')
         J = self.f_J(u, x0, up)
-        print(f'ego cost: {J[0]}, tar cost: {J[1]}')
+        print('Cost: ' + str(J))
 
         solve_info['time'] = solve_dur
         solve_info['num_iters'] = sqp_it
@@ -926,30 +926,6 @@ class DGSQP(AbstractSolver):
         self.f_dphi = ca.external('f_dphi', solver_path)
         self.f_dstat_norm = ca.external('f_dstat_norm', solver_path)
 
-    def _line_search(self, u, du, l, dl, merit, d_merit):
-        phi = merit(u, l)
-        dphi = d_merit(u, du, l, dl)
-        if dphi > 0:
-            if self.verbose:
-                print(f'- Line search directional derivative is positive: {dphi}')
-        alpha, conv = 1.0, False
-        for i in range(self.line_search_iters):
-            u_trial = u + alpha*du
-            l_trial = l + alpha*dl
-            phi_trial = merit(u_trial, l_trial)
-            if self.verbose:
-                print(f'- Line search iteration: {i} | merit gap: {phi_trial-(phi + self.beta*alpha*dphi):.4e} | a: {alpha:.4e}')
-            if phi_trial <= phi + self.beta*alpha*dphi:
-                conv = True
-                break
-            else:
-                alpha *= self.tau
-        if not conv:
-            if self.verbose:
-                print('- Max iterations reached, line search did not succeed')
-            # pdb.set_trace()
-        return u_trial, l_trial, phi_trial
-
     def _line_search_2(self, u, du, l, dl, s, ds, merit, d_merit):
         phi = merit(u, l, s)
         dphi = d_merit(u, du, l, dl, s, ds)
@@ -976,82 +952,6 @@ class DGSQP(AbstractSolver):
                 print('- Max iterations reached, line search did not succeed')
             # pdb.set_trace()
         return u_trial, l_trial, phi_trial
-
-    def _watchdog_line_search(self, u_k, du_k, l_k, dl_k, x0, up, merit, d_merit, conv_approx=False):
-        if self.verbose:
-            print('===================================================')
-            print('Watchdog step acceptance routine')
-        t_hat = 7 # Number of steps where we search for sufficient merit decrease
-        phi_log = []
-
-        phi_k = merit(u_k, l_k)
-        phi_log.append(phi_k)
-        dphi_k = d_merit(u_k, du_k, l_k, dl_k)
-        if dphi_k > 0:
-            if self.verbose:
-                print(f'Time k: Directional derivative is positive: {dphi_k}')
-
-        # Take relaxed (full) step
-        u_kp1 = u_k + du_k
-        l_kp1 = l_k + dl_k
-        phi_kp1 = merit(u_kp1, l_kp1)
-        phi_log.append(phi_kp1)
-
-        # Check for sufficient decrease w.r.t. time k
-        if self.verbose:
-            print(f'Time k+1:')
-        if phi_kp1 <= phi_k + self.beta*dphi_k:
-            if self.verbose:
-                print(f'Sufficient decrease achieved')
-            return u_kp1, l_kp1
-        if self.verbose:
-            print(f'Insufficient decrease in merit')
-
-        # Check for sufficient decrease in the next t_hat steps
-        u_t, l_t, phi_t = u_kp1, l_kp1, phi_kp1
-        for t in range(t_hat):
-            if self.verbose:
-                print(f'Time k+{t+2}:')
-            # Compute step at time t
-            Q_t, q_t, G_t, g_t, x_t = self._evaluate(u_t, l_t, x0, up)
-            if conv_approx:
-                du_t, l_hat = self._solve_conv_qp(Q_t, q_t, G_t, g_t)
-            else:
-                du_t, l_hat = self._solve_nonconv_qp(Q_t, q_t, G_t, g_t)
-            dl_t = l_hat - l_t
-
-            # Do line search
-            u_tp1, l_tp1, phi_tp1 = self._line_search(u_t, du_t, l_t, dl_t, merit, d_merit)
-            phi_log.append(phi_tp1)
-            if self.verbose:
-                print(phi_log)
-            
-            # Check for sufficient decrease w.r.t. time 0
-            if phi_t <= phi_k or phi_tp1 <= phi_k + self.beta*dphi_k:
-                if self.verbose:
-                    print(f'Sufficient decrease achieved')
-                return u_tp1, l_tp1
-            
-            # Update for next time step
-            u_t, l_t, phi_t = u_tp1, l_tp1, phi_tp1
-        
-        if phi_tp1 > phi_k:
-            if self.verbose:
-                print(f'No decrease in merit, returning to search along step at time k')
-            u_kp1, l_kp1, phi_kp1 = self._line_search(u_k, du_k, l_k, dl_k, merit, d_merit)
-            return u_kp1, l_kp1
-        else:
-            if self.verbose:
-                print(f'Insufficient decrease in merit')
-            Q_tp1, q_tp1, G_tp1, g_tp1, x_tp1 = self._evaluate(u_tp1, l_tp1, x0, up)
-            if conv_approx:
-                du_tp1, l_hat = self._solve_conv_qp(Q_tp1, q_tp1, G_tp1, g_tp1)
-            else:
-                du_tp1, l_hat = self._solve_nonconv_qp(Q_tp1, q_tp1, G_tp1, g_tp1)
-            dl_tp1 = l_hat - l_tp1
-
-            u_tp2, l_tp2, phi_tp2 = self._line_search(u_tp1, du_tp1, l_tp1, dl_tp1, merit, d_merit)
-            return u_tp2, l_tp2
 
     def _watchdog_line_search_2(self, u_k, du_k, l_k, dl_k, s_k, ds_k, x0, up, merit, d_merit, conv_approx=False):
         if self.verbose:
@@ -1228,7 +1128,6 @@ class DGSQP(AbstractSolver):
         self.ax_s.autoscale_view()
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
-
 
 if __name__ == '__main__':
     pass
