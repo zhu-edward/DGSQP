@@ -5,7 +5,7 @@ Author: Edward Zhu (edward.zhu@berkeley.edu)
 This repository contains a Python implementation of the Dynamic Game SQP algorithm.
 
 ## Related Paper
-[arXiv]()
+[arXiv](http://arxiv.org/abs/2203.16478)
 
 ## Installation
 Dependencies:
