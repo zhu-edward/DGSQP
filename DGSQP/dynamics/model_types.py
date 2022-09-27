@@ -32,8 +32,8 @@ class DynamicsConfig(ModelConfig):
 
 @dataclass
 class DynamicBicycleConfig(DynamicsConfig):  # configurations for simulated vehicle model, can grow to be used elsewhere.
-    wheel_dist_front: float         = field(default = 0.125)
-    wheel_dist_rear: float          = field(default = 0.125)
+    wheel_dist_front: float         = field(default = 0.13)
+    wheel_dist_rear: float          = field(default = 0.13)
     wheel_dist_center_front: float  = field(default = 0.1)
     wheel_dist_center_rear:  float  = field(default = 0.1)
     bump_dist_front: float          = field(default = 0.15)
@@ -41,18 +41,33 @@ class DynamicBicycleConfig(DynamicsConfig):  # configurations for simulated vehi
     bump_dist_center: float         = field(default = 0.1)
     bump_dist_top: float            = field(default = 0.1)
     com_height: float               = field(default = 0.05)
-    mass: float                     = field(default = 1.98)
-    yaw_inertia: float              = field(default = 0.03)
-    pitch_inertia: float            = field(default = 0.03)
-    roll_inertia: float             = field(default = 0.03)
+
+    mass: float                     = field(default = 2.366)
     gravity: float                  = field(default = 9.81)
-    wheel_friction: float           = field(default = 0.8)
-    drag_coefficient: float         = field(default = 0.05)
-    slip_coefficient: float         = field(default = 0.1)
-    pacejka_b: float                = field(default = 1.0)
-    pacejka_c: float                = field(default = 1.25)
-    pacejka_d_front: float          = field(default = None)
-    pacejka_d_rear: float           = field(default = None)
+
+    yaw_inertia: float              = field(default = 0.018)
+    pitch_inertia: float            = field(default = 0.03)  # Not being used in dynamics
+    roll_inertia: float             = field(default = 0.03)  # Not being used in dynamics
+    
+    drag_coefficient: float         = field(default = 0.0)  # .05
+    damping_coefficient: float      = field(default = 0.0)
+    rolling_resistance: float       = field(default = 0.0)
+    rolling_resistance_exponent: float = field(default = 0.0)
+
+    tire_model: str                 = field(default = 'linear')
+
+    wheel_friction: float           = field(default = 0.5)
+    pacejka_b_front: float          = field(default = 10.0)
+    pacejka_b_rear: float           = field(default = 20.0)
+    pacejka_c_front: float          = field(default = 1.0)
+    pacejka_c_rear: float           = field(default = 1.5)
+    pacejka_d_front: float          = field(default = 13)
+    pacejka_d_rear: float           = field(default = 15)
+
+    linear_bf: float                = field(default = 1.0)
+    linear_br: float                = field(default = 1.0)
+
+    simple_slip: bool               = field(default=False)
 
     def __post_init__(self):
         if self.pacejka_d_front is None:
@@ -62,8 +77,8 @@ class DynamicBicycleConfig(DynamicsConfig):  # configurations for simulated vehi
 
 @dataclass
 class KinematicBicycleConfig(DynamicsConfig):  # configurations for simulated vehicle model, can grow to be used elsewhere.
-    wheel_dist_front: float         = field(default = 0.125)
-    wheel_dist_rear: float          = field(default = 0.125)
+    wheel_dist_front: float         = field(default = 0.13)
+    wheel_dist_rear: float          = field(default = 0.13)
     wheel_dist_center_front: float  = field(default = 0.1)
     wheel_dist_center_rear:  float  = field(default = 0.1)
     bump_dist_front: float          = field(default = 0.15)
@@ -71,11 +86,23 @@ class KinematicBicycleConfig(DynamicsConfig):  # configurations for simulated ve
     bump_dist_center: float         = field(default = 0.1)
     bump_dist_top: float            = field(default = 0.1)
     com_height: float               = field(default = 0.05)
-    mass: float                     = field(default = 1.98)
-    gravity: float                  = field(default = 9.81)
-    drag_coefficient: float         = field(default = 0.05)
-    slip_coefficient: float         = field(default = 0.1)
 
+    mass: float                     = field(default = 2.366)
+
+    drag_coefficient: float         = field(default = 0.0)
+    damping_coefficient: float      = field(default = 0.0)
+    slip_coefficient: float         = field(default = 0.0)
+    rolling_resistance: float       = field(default = 0.0)
+    rolling_resistance_exponent: float = field(default = 0.5)
+
+@dataclass
+class UnicycleConfig(DynamicsConfig):  # configurations for simulated vehicle model, can grow to be used elsewhere.
+    mass: float                         = field(default = 2.366)
+    damping_coefficient: float          = field(default = 0.0)  # .05
+    drag_coefficient: float             = field(default = 0.0)  # .05
+    rolling_resistance: float           = field(default = 0.0)
+    rolling_resistance_exponent: float  = field(default = 0.5)
+    
 @dataclass
 class MultiAgentModelConfig(DynamicsConfig):
     use_mx: bool                    = field(default = False)

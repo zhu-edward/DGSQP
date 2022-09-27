@@ -23,10 +23,13 @@ import copy
 # Initial time
 t = 0
 
-time_str = datetime.now().strftime('%m-%d-%Y_%H-%M-%S')
-data_dir = pathlib.Path(pathlib.Path.home(), f'results/sqgames_algams_mc_agents_{time_str}')
-if not data_dir.exists():
-    data_dir.mkdir(parents=True)
+save_data = False
+
+if save_data:
+    time_str = datetime.now().strftime('%m-%d-%Y_%H-%M-%S')
+    data_dir = pathlib.Path(pathlib.Path.home(), f'results/sqgames_algams_mc_agents_{time_str}')
+    if not data_dir.exists():
+        data_dir.mkdir(parents=True)
 
 # =============================================
 # Helper functions
@@ -87,7 +90,7 @@ cost_params = dict(input_weight=[1.0, 1.0],
                          comp_weights=[10.0, 5.0],
                          blocking_weight=0,
                          obs_weight=0,
-                         obs_r=0.2)
+                         obs_r=0.4)
 
 use_ws=True
 ibr_ws=False
@@ -98,7 +101,7 @@ ibr_ws=False
 exp_M = [3]
 exp_N = [25]
 exp_theta = [90]
-num_mc = 100
+num_mc = 1
 rng = np.random.default_rng()
 
 for theta in exp_theta:
@@ -149,11 +152,7 @@ for theta in exp_theta:
                                                 beta=0.01,
                                                 tau=0.5,
                                                 verbose=False,
-                                                code_gen=False,
-                                                jit=False,
-                                                opt_flag='O3',
-                                                solver_dir=None,
-                                                debug_plot=True,
+                                                debug_plot=False,
                                                 pause_on_plot=True)
 
             agent_costs = []
@@ -246,10 +245,6 @@ for theta in exp_theta:
                                         p_tol=1e-3,
                                         d_tol=1e-3,
                                         verbose=False,
-                                        code_gen=False,
-                                        jit=False,
-                                        opt_flag='O3',
-                                        solver_dir=None,
                                         debug_plot=False,
                                         pause_on_plot=True)
                 ibr_controller = IBR(joint_model, 
@@ -259,17 +254,6 @@ for theta in exp_theta:
                                             {'ub': state_input_ub, 'lb': state_input_lb},
                                             ibr_params)
 
-            if use_ws:
-                agent_steer_params = [PIDParams(dt=dt, Kp=1.0, Ki=0.005,
-                                                    u_max=state_input_ub[i].u.u_steer, 
-                                                    u_min=state_input_lb[i].u.u_steer, 
-                                                    du_max=state_input_rate_ub[i].u.u_steer, 
-                                                    du_min=state_input_rate_lb[i].u.u_steer) for _ in range(M)]
-                agent_speed_params = [PIDParams(dt=dt, Kp=1.0,
-                                                    u_max=state_input_ub[i].u.u_a, 
-                                                    u_min=state_input_lb[i].u.u_a, 
-                                                    du_max=state_input_rate_ub[i].u.u_a, 
-                                                    du_min=state_input_rate_lb[i].u.u_a) for _ in range(M)]
             first_seg_len = track_obj.cl_segs[0,0]
             sq_res = []
             for n in range(num_mc):
@@ -288,9 +272,19 @@ for theta in exp_theta:
                         track_obj.local_to_global_typed(joint_state[i])
 
                         if use_ws:
-                            v_ref = joint_state[i].v.v_long
-                            x_ref = joint_state[i].p.x_tran
-                            pid_controller = PIDLaneFollower(v_ref, x_ref, dt, agent_steer_params[i], agent_speed_params[i])
+                            agent_steer_params = PIDParams(dt=dt, Kp=1.0, Ki=0.005,
+                                                                x_ref=joint_state[i].p.x_tran,
+                                                                u_max=state_input_ub[i].u.u_steer, 
+                                                                u_min=state_input_lb[i].u.u_steer, 
+                                                                du_max=state_input_rate_ub[i].u.u_steer, 
+                                                                du_min=state_input_rate_lb[i].u.u_steer)
+                            agent_speed_params = PIDParams(dt=dt, Kp=1.0,
+                                                                x_ref=joint_state[i].v.v_long,
+                                                                u_max=state_input_ub[i].u.u_a, 
+                                                                u_min=state_input_lb[i].u.u_a, 
+                                                                du_max=state_input_rate_ub[i].u.u_a, 
+                                                                du_min=state_input_rate_lb[i].u.u_a)
+                            pid_controller = PIDLaneFollower(dt, agent_steer_params, agent_speed_params)
 
                             # Construct initial guess for ALGAMES MPC with PID
                             agent_state = [copy.deepcopy(joint_state[i])]
@@ -341,7 +335,8 @@ for theta in exp_theta:
                             agent_dyn_configs=agent_dyn_configs,
                             joint_model_config=joint_model_config)
 
-            filename = f'data_c_{theta}_M_{M}_N_{N}.pkl'
-            data_path = data_dir.joinpath(filename)
-            with open(data_path, 'wb') as f:
-                pickle.dump(results, f)
+            if save_data:
+                filename = f'data_c_{theta}_M_{M}_N_{N}.pkl'
+                data_path = data_dir.joinpath(filename)
+                with open(data_path, 'wb') as f:
+                    pickle.dump(results, f)

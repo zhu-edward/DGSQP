@@ -2,6 +2,8 @@
 
 import numpy as np
 
+import os
+
 from DGSQP.tracks.radius_arclength_track import RadiusArclengthTrack
 
 class StraightTrack(RadiusArclengthTrack):
@@ -78,3 +80,30 @@ class ChicaneTrack(RadiusArclengthTrack):
         self.phase_out = phase_out
         self.circuit = False
         self.initialize()
+
+def get_save_folder():
+    return os.path.join(os.path.dirname(__file__), 'track_data')
+    
+def get_available_tracks():
+    save_folder = get_save_folder()
+    return os.listdir(save_folder)
+    
+def get_track(track_file):
+    if not track_file.endswith('.npz'): track_file += '.npz'
+    
+    if track_file not in get_available_tracks():
+        raise ValueError('Chosen Track is unavailable: %s\nlooking in:%s\n Available Tracks: %s'%(track_file, 
+                        os.path.join(os.path.dirname(__file__), 'tracks', 'track_data'),
+                        str(get_available_tracks())))
+
+    save_folder = get_save_folder()
+    load_file = os.path.join(save_folder,track_file)
+    
+    npzfile = np.load(load_file, allow_pickle = True)
+    if npzfile['save_mode'] == 'radius_and_arc_length':
+        track = RadiusArclengthTrack()
+        track.initialize(npzfile['track_width'], npzfile['slack'], npzfile['cl_segs'])
+    else:
+        raise NotImplementedError('Unknown track save mode: %s'%npzfile['save_mode'])
+        
+    return track   

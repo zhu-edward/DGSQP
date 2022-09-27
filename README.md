@@ -14,7 +14,6 @@ Dependencies:
 - `casadi`
 - `osqp`
 - `matplotlib`
-- `pyqtgraph`
 
 The following command will install the Python package `DGSQP`:
 ```

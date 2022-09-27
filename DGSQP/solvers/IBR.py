@@ -1,13 +1,9 @@
 #!/usr/bin python3
 
 import numpy as np
-import scipy as sp
 import casadi as ca
 
-import pathlib
-import os
 import copy
-import shutil
 import pdb
 import warnings
 from datetime import datetime
@@ -40,29 +36,7 @@ class IBR(AbstractSolver):
         self.ibr_iters = params.ibr_iters
 
         self.verbose = params.verbose
-        self.code_gen = params.code_gen
-        self.jit = params.jit
-        self.opt_flag = params.opt_flag
         self.solver_name = params.solver_name
-        if params.solver_dir is not None:
-            self.solver_dir = os.path.join(params.solver_dir, self.solver_name)
-
-        if not params.enable_jacobians:
-            jac_opts = dict(enable_fd=False, enable_jacobian=False, enable_forward=False, enable_reverse=False)
-        else:
-            jac_opts = dict()
-
-        if self.code_gen:
-            if self.jit:
-                self.options = dict(jit=True, jit_name=self.solver_name, compiler='shell', jit_options=dict(compiler='gcc', flags=['-%s' % self.opt_flag], verbose=self.verbose), **jac_opts)
-            else:
-                self.options = dict(jit=False, **jac_opts)
-                self.c_file_name = self.solver_name + '.c'
-                self.so_file_name = self.solver_name + '.so'
-                if params.solver_dir is not None:
-                    self.solver_dir = pathlib.Path(params.solver_dir).expanduser().joinpath(self.solver_name)
-        else:
-            self.options = dict(jit=False, **jac_opts)
 
         self.num_qa_d = [int(self.joint_dynamics.dynamics_models[a].n_q) for a in range(self.M)]
         self.num_ua_d = [int(self.joint_dynamics.dynamics_models[a].n_u) for a in range(self.M)]
@@ -74,8 +48,6 @@ class IBR(AbstractSolver):
         self.costs_sym = costs
 
         # The constraints should be a list (of length N+1) of casadi functions such that constraints[i] <= 0
-        # if len(constraints) != self.N+1:
-        #     raise ValueError('Horizon length: %i, but %i constraint functions were provided' % (self.N+1, len(constraints)))
         self.constraints_sym = agent_constraints
         self.shared_constraints_sym = shared_constraints
         
@@ -144,10 +116,7 @@ class IBR(AbstractSolver):
 
         self.u_prev = np.zeros(self.n_u)
 
-        if params.solver_dir:
-            self._load_solver()
-        else:
-            self._build_solver()
+        self._build_solver()
         
         self.u_ws = [np.zeros((self.N, self.num_ua_d[a])) for a in range(self.M)]
         if self.use_ps and self.alpha > 0:
@@ -432,7 +401,7 @@ class IBR(AbstractSolver):
 
         for k in range(self.N):
             x_ph.append(self.joint_dynamics.fd(x_ph[k], uk_ph[k]))
-        self.f_state_rollout = ca.Function('f_state_rollout', [ca.vertcat(*ua_ph), x_ph[0]], x_ph, self.options)
+        self.f_state_rollout = ca.Function('f_state_rollout', [ca.vertcat(*ua_ph), x_ph[0]], x_ph)
         
         # Agent cost functions
         J = [ca.DM.zeros(1) for _ in range(self.M)]
@@ -440,7 +409,7 @@ class IBR(AbstractSolver):
             for k in range(self.N):
                 J[a] += self.costs_sym[a][k](x_ph[k], u_ph[a][k], u_ph[a][k-1])
             J[a] += self.costs_sym[a][-1](x_ph[-1])
-        self.f_J = ca.Function('f_J', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], J, self.options)
+        self.f_J = ca.Function('f_J', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], J)
         
         Cs = [[] for _ in range(self.N+1)] # Shared constraints
         Ca = [[[] for _ in range(self.N+1)] for _ in range(self.M)] # Agent specific constraints
@@ -514,7 +483,7 @@ class IBR(AbstractSolver):
             C[k] = ca.vertcat(*C[k])
             self.n_c[k] = C[k].shape[0]
         for a in range(self.M): self.Cbr_v_idxs[a] = np.concatenate(self.Cbr_v_idxs[a])
-        self.f_C = ca.Function(f'f_C', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], C, self.options)
+        self.f_C = ca.Function(f'f_C', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], C)
 
         # Best response specific constraint functions
         Cbr = [[[] for _ in range(self.N+1)] for _ in range(self.M)]
@@ -522,39 +491,30 @@ class IBR(AbstractSolver):
             for a in range(self.M):
                 Cbr[a][k] = C[k][self.Cbr_k_idxs[a][k]]
                 self.n_cbr[a][k] = Cbr[a][k].shape[0]
-        self.f_Cbr = [ca.Function(f'f_C{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], Cbr[a], self.options) for a in range(self.M)]
+        self.f_Cbr = [ca.Function(f'f_C{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], Cbr[a]) for a in range(self.M)]
 
         # Symbolic gradients of cost and constraint functions
         Du_J = [ca.jacobian(J[a], ua_ph[a]).T for a in range(self.M)]
         Du_C = ca.jacobian(ca.vertcat(*C), ca.vertcat(*ua_ph))
         Du_Cbr = [ca.jacobian(ca.vertcat(*Cbr[a]), ua_ph[a]) for a in range(self.M)]
-        self.f_Du_J = [ca.Function(f'f_Du_J{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_J[a]], self.options) for a in range(self.M)]
-        self.f_Du_C = ca.Function('f_Du_C', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_C], self.options)
-        self.f_Du_Cbr = [ca.Function(f'f_Du_Cbr{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_Cbr[a]], self.options) for a in range(self.M)]
+        self.f_Du_J = [ca.Function(f'f_Du_J{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_J[a]]) for a in range(self.M)]
+        self.f_Du_C = ca.Function('f_Du_C', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_C])
+        self.f_Du_Cbr = [ca.Function(f'f_Du_Cbr{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_Cbr[a]]) for a in range(self.M)]
 
         # Symbolic gradients of best response Lagrangians
         lbr_ph = [[ca.MX.sym(f'lbr{a}_ph_{k}', self.n_cbr[a][k]) for k in range(self.N+1)] for a in range(self.M)]
         Lbr = [J[a] + ca.dot(ca.vertcat(*lbr_ph[a]), ca.vertcat(*Cbr[a])) for a in range(self.M)]
         Dua_Lbr = [ca.jacobian(Lbr[a], ua_ph[a]).T for a in range(self.M)]
         # Duu_L = [[ca.jacobian(Du_L[a][b], ca.vertcat(*ua_ph)) for b in range(self.M)] for a in range(self.M)]
-        self.f_Dua_Lbr = [ca.Function(f'f_Du_Lbr{a}', [ca.vertcat(*ua_ph), ca.vertcat(*lbr_ph[a]), x_ph[0], uk_ph[-1]], [Dua_Lbr[a]], self.options) for a in range(self.M)]
-        # self.f_Duu_L = [ca.Function(f'f_Duu_L{a}', [ca.vertcat(*ua_ph), ca.vertcat(*l_ph), x_ph[0], uk_ph[-1]], Duu_L[a], self.options) for a in range(self.M)]
-
-        if self.code_gen and self.jit:
-            self.code_gen_opts = dict(jit=True, 
-                                jit_name=self.solver_name, 
-                                compiler='shell',
-                                jit_options=dict(compiler='gcc', flags=['-%s' % self.opt_flag], verbose=self.verbose))
-        else:
-            self.code_gen_opts = dict(jit=False)
+        self.f_Dua_Lbr = [ca.Function(f'f_Du_Lbr{a}', [ca.vertcat(*ua_ph), ca.vertcat(*lbr_ph[a]), x_ph[0], uk_ph[-1]], [Dua_Lbr[a]]) for a in range(self.M)]
+        # self.f_Duu_L = [ca.Function(f'f_Duu_L{a}', [ca.vertcat(*ua_ph), ca.vertcat(*l_ph), x_ph[0], uk_ph[-1]], Duu_L[a]) for a in range(self.M)]
 
         ipopt_opts = dict(max_iter=200,
                           mu_strategy='adaptive',
                           warm_start_init_point='yes')
         solver_opts = dict(error_on_fail=False, 
                             verbose_init=self.verbose, 
-                            ipopt=ipopt_opts,
-                            **self.code_gen_opts)
+                            ipopt=ipopt_opts)
 
         reg = 1e-3
         Fbr, Dula_Fbr, Duo_Fbr, Duo_ubr = [], [], [], []
@@ -565,14 +525,14 @@ class IBR(AbstractSolver):
             uo = [ua_ph[b] for b in range(self.M) if b != a]
 
             Fbr.append(ca.vertcat(Dua_Lbr[a], ca.vertcat(*lbr_ph[a])*ca.vertcat(*Cbr[a])))
-            self.f_Fbr.append(ca.Function(f'f_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Fbr[a]], self.options))
+            self.f_Fbr.append(ca.Function(f'f_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Fbr[a]]))
             Dula_Fbr.append(ca.jacobian(Fbr[a], ca.vertcat(ua_ph[a], *lbr_ph[a])))
-            self.f_Dula_Fbr.append(ca.Function(f'f_Dul{a}_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Dula_Fbr[a]], self.options))
+            self.f_Dula_Fbr.append(ca.Function(f'f_Dul{a}_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Dula_Fbr[a]]))
             Duo_Fbr.append(ca.jacobian(Fbr[a], ca.vertcat(*uo)))
-            self.f_Duo_Fbr.append(ca.Function(f'f_Duo_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Duo_Fbr[a]], self.options))
+            self.f_Duo_Fbr.append(ca.Function(f'f_Duo_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Duo_Fbr[a]]))
             # Duo_ua.append(-ca.solve(Duala_Fa[a]+reg*ca.DM.eye(Duala_Fa[a].shape[0]), Duo_Fa[a])[:self.N*self.num_ua_d[a],:])
             Duo_ubr.append(-ca.solve(Dula_Fbr[a], Duo_Fbr[a])[:self.N*self.num_ua_d[a],:])
-            self.f_Duo_ubr.append(ca.Function(f'f_Duo_u{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Duo_ubr[a]], self.options))
+            self.f_Duo_ubr.append(ca.Function(f'f_Duo_u{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Duo_ubr[a]]))
 
             self.br_nlps.append(dict(x=ua_ph[a], 
                                      p=ca.vertcat(x_ph[0], uk_ph[-1], *uo), 
@@ -613,8 +573,7 @@ class IBR(AbstractSolver):
                           tol=1e-5)
         solver_opts = dict(error_on_fail=False, 
                             verbose_init=self.verbose, 
-                            ipopt=ipopt_opts,
-                            **self.code_gen_opts)
+                            ipopt=ipopt_opts)
 
         self.ps_br_nlps, self.ps_br_solvers = [], []
         for a in range(self.M):
@@ -628,43 +587,7 @@ class IBR(AbstractSolver):
         lps_ph = [[ca.MX.sym(f'lps{a}_ph_{k}', self.n_c[k]) for k in range(self.N+1)] for a in range(self.M)]
         Lps = [J_ps[a] + ca.dot(ca.vertcat(*lps_ph[a]), ca.vertcat(*C_ps[a])) for a in range(self.M)]
         Dua_Lps = [ca.jacobian(Lps[a], ua_ph[a]).T for a in range(self.M)]
-        self.f_Dua_Lps = [ca.Function(f'f_Du_Lps{a}', [ca.vertcat(*ua_ph), ca.vertcat(*lps_ph[a]), ca.vertcat(*uan_ph), ca.vertcat(*Duo_ubr_ph), alpha, x_ph[0], uk_ph[-1]], [Dua_Lps[a]], self.options) for a in range(self.M)]
-
-        if self.code_gen and not self.jit:
-            generator = ca.CodeGenerator(self.c_file_name)
-
-            # Set up paths
-            cur_dir = pathlib.Path.cwd()
-            gen_path = cur_dir.joinpath(self.solver_name)
-            c_path = gen_path.joinpath(self.c_file_name)
-            if gen_path.exists():
-                shutil.rmtree(gen_path)
-            gen_path.mkdir(parents=True)
-
-            os.chdir(gen_path)
-            if self.verbose:
-                print('- Generating C code for solver %s at %s' % (self.solver_name, str(gen_path)))
-            generator.generate()
-            pdb.set_trace()
-            # Compile into shared object
-            so_path = gen_path.joinpath(self.so_file_name)
-            if self.verbose:
-                print('- Compiling shared object %s from %s' % (so_path, c_path))
-                print('- Executing "gcc -fPIC -shared -%s %s -o %s"' % (self.opt_flag, c_path, so_path))
-            os.system('gcc -fPIC -shared -%s %s -o %s' % (self.opt_flag, c_path, so_path))
-
-            # Swtich back to working directory
-            os.chdir(cur_dir)
-            install_dir = self.install()
-
-            # Load solver
-            self._load_solver(install_dir.joinpath(self.so_file_name))
-
-    def _load_solver(self, solver_path=None):
-        if solver_path is None:
-            solver_path = str(pathlib.Path(self.solver_dir, self.so_file_name).expanduser())
-        if self.verbose:
-            print('- Loading solver from %s' % solver_path)
+        self.f_Dua_Lps = [ca.Function(f'f_Du_Lps{a}', [ca.vertcat(*ua_ph), ca.vertcat(*lps_ph[a]), ca.vertcat(*uan_ph), ca.vertcat(*Duo_ubr_ph), alpha, x_ph[0], uk_ph[-1]], [Dua_Lps[a]]) for a in range(self.M)]
 
     def get_prediction(self) -> List[VehiclePrediction]:
         return self.state_input_predictions

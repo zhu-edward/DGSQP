@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+# This script runs the curved track segment experiment in Section VI.B in https://arxiv.org/pdf/2203.16478.pdf
+
 from DGSQP.solvers.IBR import IBR
 from DGSQP.solvers.DGSQP import DGSQP
 from DGSQP.solvers.ALGAMES import ALGAMES
@@ -24,10 +26,13 @@ import copy
 # Initial time
 t = 0
 
-time_str = datetime.now().strftime('%m-%d-%Y_%H-%M-%S')
-data_dir = pathlib.Path(pathlib.Path.home(), f'results/dgsqp_algams_mc_curve_{time_str}')
-if not data_dir.exists():
-    data_dir.mkdir(parents=True)
+save_data = False
+
+if save_data:
+    time_str = datetime.now().strftime('%m-%d-%Y_%H-%M-%S')
+    data_dir = pathlib.Path(pathlib.Path.home(), f'results/dgsqp_algams_mc_curve_{time_str}')
+    if not data_dir.exists():
+        data_dir.mkdir(parents=True)
 
 # =============================================
 # Helper functions
@@ -86,8 +91,8 @@ ego_state_input_min=VehicleState(x=Position(x=-np.inf, y=-np.inf),
                             v=BodyLinearVelocity(v_long=-np.inf, v_tran=-np.inf),
                             w=BodyAngularVelocity(w_psi=-np.inf),
                             u=VehicleActuation(u_a=-2.1, u_steer=-0.436))
-ego_state_input_rate_max=VehicleState(u=VehicleActuation(u_a=10.0, u_steer=np.pi))
-ego_state_input_rate_min=VehicleState(u=VehicleActuation(u_a=-10.0, u_steer=-np.pi))
+ego_state_input_rate_max=VehicleState(u=VehicleActuation(u_a=10.0, u_steer=4.5))
+ego_state_input_rate_min=VehicleState(u=VehicleActuation(u_a=-10.0, u_steer=-4.5))
 
 tar_state_input_max=VehicleState(x=Position(x=np.inf, y=np.inf),
                             p=ParametricPose(s=np.inf, x_tran=half_width, e_psi=np.inf),
@@ -101,8 +106,8 @@ tar_state_input_min=VehicleState(x=Position(x=-np.inf, y=-np.inf),
                             v=BodyLinearVelocity(v_long=-np.inf, v_tran=-np.inf),
                             w=BodyAngularVelocity(w_psi=-np.inf),
                             u=VehicleActuation(u_a=-2.1, u_steer=-0.436))
-tar_state_input_rate_max=VehicleState(u=VehicleActuation(u_a=10.0, u_steer=np.pi))
-tar_state_input_rate_min=VehicleState(u=VehicleActuation(u_a=-10.0, u_steer=-np.pi))
+tar_state_input_rate_max=VehicleState(u=VehicleActuation(u_a=10.0, u_steer=4.5))
+tar_state_input_rate_min=VehicleState(u=VehicleActuation(u_a=-10.0, u_steer=-4.5))
 
 state_input_ub = [ego_state_input_max, tar_state_input_max]
 state_input_lb = [ego_state_input_min, tar_state_input_min]
@@ -124,14 +129,12 @@ ego_r=0.2
 tar_r=0.2
 
 use_ws=True
-ibr_ws=True
+ibr_ws=False
 
 exp_N = [10, 15, 20, 25]
-exp_theta = np.arange(15, 91, 15)
-# exp_N = [25]
-# exp_theta = [90]
-num_mc = 100
-rng = np.random.default_rng()
+exp_theta = [45, 75, 90]
+num_mc = 200
+rng = np.random.default_rng(seed=1)
 
 for theta in exp_theta:
     track_obj = CurveTrack(enter_straight_length=1,
@@ -152,10 +155,10 @@ for theta in exp_theta:
         # =============================================
         # Solver setup
         # =============================================
-        dgsqp_params = DGSQPParams(solver_name='SQGAMES',
+        sqgames_params = DGSQPParams(solver_name='ego_SQGAMES',
                                             dt=dt,
                                             N=N,
-                                            reg=1e-3,
+                                            reg=0.0,
                                             nonmono_ls=True,
                                             line_search_iters=50,
                                             sqp_iters=50,
@@ -164,15 +167,12 @@ for theta in exp_theta:
                                             beta=0.01,
                                             tau=0.5,
                                             verbose=False,
-                                            code_gen=False,
-                                            jit=False,
-                                            opt_flag='O3',
-                                            solver_dir=None,
                                             debug_plot=False,
-                                            pause_on_plot=True)
-        algames_params = ALGAMESParams(solver_name='ALGAMES',
+                                            pause_on_plot=False)
+        algames_params = ALGAMESParams(solver_name='ego_ALGAMES',
                                             dt=dt,
                                             N=N,
+                                            dynamics_hessians=True,
                                             outer_iters=50,
                                             line_search_iters=50,
                                             line_search_tol=1e-6,
@@ -182,17 +182,13 @@ for theta in exp_theta:
                                             eq_tol=1e-3,
                                             opt_tol=1e-3,
                                             rho=1.0,
-                                            gamma=10.0,
+                                            gamma=5.0,
                                             rho_max=1e7,
                                             beta=0.01,
                                             tau=0.5,
-                                            q_reg=1e-3,
-                                            u_reg=1e-3,
+                                            q_reg=0.0,
+                                            u_reg=0.0,
                                             verbose=False,
-                                            code_gen=False,
-                                            jit=False,
-                                            opt_flag='O3',
-                                            solver_dir=None,
                                             debug_plot=False,
                                             pause_on_plot=False)
 
@@ -230,6 +226,7 @@ for theta in exp_theta:
         ego_obs_cost = (1/2)*ego_cost_params['obs_weight']*saturation_cost(obs_cost_d-ca.norm_2(ego_pos - tar_pos))**2
 
         ego_prog_cost = -ego_cost_params['comp_weights'][0]*sym_q[ego_s_idx]
+        # ego_comp_cost = ego_cost_params['comp_weights'][1]*(sym_q[tar_s_idx]-sym_q[ego_s_idx])
         ego_comp_cost = ego_cost_params['comp_weights'][1]*ca.atan(sym_q[tar_s_idx]-sym_q[ego_s_idx])
 
         ego_sym_stage = ego_quad_input_cost \
@@ -257,6 +254,7 @@ for theta in exp_theta:
         tar_obs_cost = (1/2)*tar_cost_params['obs_weight']*saturation_cost(obs_cost_d-ca.norm_2(ego_pos - tar_pos))**2
 
         tar_prog_cost = -tar_cost_params['comp_weights'][0]*sym_q[tar_s_idx]
+        # tar_comp_cost = tar_cost_params['comp_weights'][1]*(sym_q[ego_s_idx]-sym_q[tar_s_idx])
         tar_comp_cost = tar_cost_params['comp_weights'][1]*ca.atan(sym_q[ego_s_idx]-sym_q[tar_s_idx])
 
         tar_sym_stage = tar_quad_input_cost \
@@ -306,10 +304,6 @@ for theta in exp_theta:
         tar_constr_stage = tar_input_rate_constr
         tar_constr_term = None
 
-        # constr_stage = obs_avoid_constr
-        constr_stage = ca.vertcat(ego_input_rate_constr, tar_input_rate_constr, obs_avoid_constr)
-        constr_term = obs_avoid_constr
-
         tar_constrs = []
         for k in range(N):
             tar_constrs.append(ca.Function(f'tar_constrs_{k}', [sym_q, sym_u_tar, sym_um_tar], [tar_constr_stage]))
@@ -331,12 +325,12 @@ for theta in exp_theta:
 
         agent_constrs = [ego_constrs, tar_constrs]
 
-        dgsqp_solver = DGSQP(joint_model, 
-                            sym_costs, 
-                            agent_constrs,
-                            shared_constrs,
-                            {'ub': state_input_ub, 'lb': state_input_lb},
-                            dgsqp_params)
+        sqgames_controller = DGSQP(joint_model, 
+                                        sym_costs, 
+                                        agent_constrs,
+                                        shared_constrs,
+                                        {'ub': state_input_ub, 'lb': state_input_lb},
+                                        sqgames_params)
 
         joint_constr_stage_0 = ca.vertcat(ego_input_rate_constr, tar_input_rate_constr)
         joint_constr_stage = ca.vertcat(ego_input_rate_constr, tar_input_rate_constr, obs_avoid_constr)
@@ -350,11 +344,11 @@ for theta in exp_theta:
                 joint_constrs.append(ca.Function(f'nl_constrs_{k}', [sym_q, ca.vertcat(sym_u_ego, sym_u_tar), ca.vertcat(sym_um_ego, sym_um_tar)], [joint_constr_stage]))
         joint_constrs.append(ca.Function(f'nl_constrs_{N}', [sym_q], [joint_constr_term]))
 
-        algames_solver = ALGAMES(joint_model, 
-                                sym_costs, 
-                                joint_constrs, 
-                                {'ub': state_input_ub, 'lb': state_input_lb},
-                                algames_params)
+        algames_controller = ALGAMES(joint_model, 
+                                        sym_costs, 
+                                        joint_constrs, 
+                                        {'ub': state_input_ub, 'lb': state_input_lb},
+                                        algames_params)
 
         if ibr_ws:
             ibr_params = IBRParams(solver_name='ibr',
@@ -366,18 +360,14 @@ for theta in exp_theta:
                                     p_tol=1e-3,
                                     d_tol=1e-3,
                                     verbose=False,
-                                    code_gen=False,
-                                    jit=False,
-                                    opt_flag='O3',
-                                    solver_dir=None,
                                     debug_plot=False,
                                     pause_on_plot=True)
-            ibr_solver = IBR(joint_model, 
-                            sym_costs, 
-                            agent_constrs,
-                            shared_constrs,
-                            {'ub': state_input_ub, 'lb': state_input_lb},
-                            ibr_params)
+            ibr_controller = IBR(joint_model, 
+                                        sym_costs, 
+                                        agent_constrs,
+                                        shared_constrs,
+                                        {'ub': state_input_ub, 'lb': state_input_lb},
+                                        ibr_params)
 
         first_seg_len = track_obj.cl_segs[0,0]
         sq_res = []
@@ -413,32 +403,32 @@ for theta in exp_theta:
                 if use_ws:
                     # Set up PID controllers for warm start
                     ego_steer_params = PIDParams(dt=dt, Kp=1.0, Ki=0.005,
+                                                x_ref=ego_sim_state.p.x_tran,
                                                 u_max=ego_state_input_max.u.u_steer, 
                                                 u_min=ego_state_input_min.u.u_steer, 
                                                 du_max=ego_state_input_rate_max.u.u_steer, 
                                                 du_min=ego_state_input_rate_min.u.u_steer)
                     ego_speed_params = PIDParams(dt=dt, Kp=1.0, 
+                                                x_ref=ego_sim_state.v.v_long,
                                                 u_max=ego_state_input_max.u.u_a, 
                                                 u_min=ego_state_input_min.u.u_a, 
                                                 du_max=ego_state_input_rate_max.u.u_a, 
                                                 du_min=ego_state_input_rate_min.u.u_a)
-                    ego_v_ref = ego_sim_state.v.v_long
-                    ego_x_ref = ego_sim_state.p.x_tran
-                    ego_pid_controller = PIDLaneFollower(ego_v_ref, ego_x_ref, dt, ego_steer_params, ego_speed_params)
+                    ego_pid_controller = PIDLaneFollower(dt, ego_steer_params, ego_speed_params)
 
                     tar_steer_params = PIDParams(dt=dt, Kp=1.0, Ki=0.005,
+                                                x_ref=tar_sim_state.p.x_tran,
                                                 u_max=tar_state_input_max.u.u_steer, 
                                                 u_min=tar_state_input_min.u.u_steer, 
                                                 du_max=tar_state_input_rate_max.u.u_steer, 
                                                 du_min=tar_state_input_rate_min.u.u_steer)
                     tar_speed_params = PIDParams(dt=dt, Kp=1.0, 
+                                                x_ref=tar_sim_state.v.v_long,
                                                 u_max=tar_state_input_max.u.u_a, 
                                                 u_min=tar_state_input_min.u.u_a, 
                                                 du_max=tar_state_input_rate_max.u.u_a, 
                                                 du_min=tar_state_input_rate_min.u.u_a)
-                    tar_v_ref = tar_sim_state.v.v_long
-                    tar_x_ref = tar_sim_state.p.x_tran
-                    tar_pid_controller = PIDLaneFollower(tar_v_ref, tar_x_ref, dt, tar_steer_params, tar_speed_params)
+                    tar_pid_controller = PIDLaneFollower(dt, tar_steer_params, tar_speed_params)
 
                     # Construct initial guess for ALGAMES MPC with PID
                     ego_state = [copy.deepcopy(ego_sim_state)]
@@ -468,10 +458,13 @@ for theta in exp_theta:
 
                     collision = check_collision(ego_q_ws, tar_q_ws, obs_d)
                     if not collision:
+                        # print('Collision free initialization found')
+                        # sqgames_controller.set_warm_start(np.hstack((ego_u_ws, tar_u_ws)))
+                        # algames_controller.set_warm_start(np.hstack((ego_q_ws, tar_q_ws)), np.hstack((ego_u_ws, tar_u_ws)))
                         break
 
                 if ibr_ws:
-                    ibr_solver.set_warm_start([ego_u_ws, tar_u_ws])
+                    ibr_controller.set_warm_start([ego_u_ws, tar_u_ws])
 
             # =============================================
             # Run for a single step
@@ -482,33 +475,34 @@ for theta in exp_theta:
             joint_state = [ego_sim_state, tar_sim_state]
 
             if ibr_ws:
-                ibr_solver.step(copy.deepcopy(joint_state))
-                dgsqp_solver.set_warm_start(ibr_solver.u_pred)
-                algames_solver.set_warm_start(ibr_solver.q_pred, ibr_solver.u_pred)
+                ibr_controller.step(copy.deepcopy(joint_state))
+                sqgames_controller.set_warm_start(ibr_controller.u_pred)
+                algames_controller.set_warm_start(ibr_controller.q_pred, ibr_controller.u_pred)
             else:
-                dgsqp_solver.set_warm_start(np.hstack([ego_u_ws, tar_u_ws]))
-                algames_solver.set_warm_start(np.hstack([ego_q_ws, tar_q_ws]), np.hstack([ego_u_ws, tar_u_ws]))
+                sqgames_controller.set_warm_start(np.hstack([ego_u_ws, tar_u_ws]))
+                algames_controller.set_warm_start(np.hstack([ego_q_ws, tar_q_ws]), np.hstack([ego_u_ws, tar_u_ws]))
 
-            dgsqp_info = dgsqp_solver.solve(copy.deepcopy(joint_state))
-            dgsqp_res = {'solve_info': copy.deepcopy(dgsqp_info), 
-                            'params': copy.deepcopy(dgsqp_params), 
+            sqgames_info = sqgames_controller.solve(copy.deepcopy(joint_state))
+            sqgames_res = {'solve_info': copy.deepcopy(sqgames_info), 
+                            'params': copy.deepcopy(sqgames_params), 
                             'init': copy.deepcopy(joint_state)}
 
-            algames_info = algames_solver.solve(copy.deepcopy(joint_state))
+            algames_info = algames_controller.solve(copy.deepcopy(joint_state))
             algames_res = {'solve_info': copy.deepcopy(algames_info), 
                             'params': copy.deepcopy(algames_params), 
                             'init': copy.deepcopy(joint_state)}
 
-            sq_res.append(dgsqp_res)
+            sq_res.append(sqgames_res)
             al_res.append(algames_res)
 
-        results = dict(dgsqp=sq_res, 
+        results = dict(sqgames=sq_res, 
                         algames=al_res, 
                         track=track_obj, 
                         agent_dyn_configs=[ego_dynamics_config, tar_dynamics_config],
                         joint_model_config=joint_model_config)
 
-        filename = f'data_c_{theta}_N_{N}.pkl'
-        data_path = data_dir.joinpath(filename)
-        with open(data_path, 'wb') as f:
-            pickle.dump(results, f)
+        if save_data:
+            filename = f'data_c_{theta}_N_{N}.pkl'
+            data_path = data_dir.joinpath(filename)
+            with open(data_path, 'wb') as f:
+                pickle.dump(results, f)

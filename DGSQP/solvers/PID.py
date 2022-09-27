@@ -41,17 +41,18 @@ class PID():
         self.disturbance_amplitude = params.disturbance_amplitude
         self.disturbance_period = params.disturbance_period
 
-        self.x_ref          = 0
-        self.u_ref          = 0
+        self.x_ref          = params.x_ref
+        self.u_ref          = params.u_ref
+        self.u_prev         = 0
 
         self.e              = 0             # error
         self.de             = 0             # finite time error difference
         self.ei             = 0             # accumulated error
 
-        self.time_execution = True
-        self.t0 = None
+        self.time_execution = False
+        self.t0 = time.time()
 
-        self.initialized = False
+        self.initialized = True
 
     def initialize(self,
                     x_ref: float = 0,
@@ -136,12 +137,12 @@ class PID():
         self.u_prev = u
         return u, info
 
-    def set_x_ref(self, x: float, x_ref: float):
+    def set_x_ref(self, x_ref: float):
         self.x_ref = x_ref
         # reset error integrator
         self.ei = 0
         # reset error, otherwise de/dt will skyrocket
-        self.e = x - x_ref
+        self.e = 0
 
     def set_u_ref(self, u_ref: float):
         self.u_ref = u_ref
@@ -193,7 +194,7 @@ class PIDLaneFollower(AbstractSolver):
 
 
     '''
-    def __init__(self, v_ref: float, x_ref: float, dt: float,
+    def __init__(self, dt: float,
                 steer_pid_params: PIDParams = None,
                 speed_pid_params: PIDParams = None):
         if steer_pid_params is None:
@@ -212,10 +213,8 @@ class PIDLaneFollower(AbstractSolver):
         self.steer_pid = PID(steer_pid_params)
         self.speed_pid = PID(speed_pid_params)
 
-        self.v_ref = v_ref
-        self.x_ref = x_ref
-        self.speed_pid.initialize(self.v_ref)
-        self.steer_pid.initialize(0)
+        self.lat_ref = steer_pid_params.x_ref
+        self.steer_pid.set_x_ref(0)
 
         self.requires_env_state = False
         return
@@ -228,24 +227,12 @@ class PIDLaneFollower(AbstractSolver):
         return
 
     def step(self, vehicle_state: VehicleState, env_state = None):
-        v = np.sqrt(vehicle_state.v.v_long**2 + vehicle_state.v.v_tran**2)
+        # v = np.sqrt(vehicle_state.v.v_long**2 + vehicle_state.v.v_tran**2)
+        v = vehicle_state.v.v_long
 
         vehicle_state.u.u_a, _ = self.speed_pid.solve(v)
         # Weighting factor: alpha*x_trans + beta*psi_diff
         alpha = 5.0
         beta = 1.0
-        vehicle_state.u.u_steer, _ = self.steer_pid.solve(alpha*(vehicle_state.p.x_tran - self.x_ref) + beta*vehicle_state.p.e_psi)
+        vehicle_state.u.u_steer, _ = self.steer_pid.solve(alpha*(vehicle_state.p.x_tran - self.lat_ref) + beta*vehicle_state.p.e_psi)
         return
-
-# Test script to ensure controller object is functioning properly
-if __name__ == "__main__":
-    import pdb
-
-    params = PIDParams(dt=0.1, Kp=3.7, Ki=7, Kd=0.5)
-    x_ref = 5
-    pid = PID(params)
-    # pdb.set_trace()
-    pid.initialize(x_ref=x_ref)
-    # pdb.set_trace()
-
-    print('Controller instantiated successfully')

@@ -84,16 +84,6 @@ class Position(PythonMsg):
     y: float = field(default=0)
     z: float = field(default=0)
 
-    # def xdot(self, q: 'OrientationQuaternion', v: 'BodyLinearVelocity') -> 'Position':
-    #     xdot = Position()
-    #     xdot.x = (1 - 2 * q.qj ** 2 - 2 * q.qk ** 2) * v.v1 + 2 * (q.qi * q.qj - q.qk * q.qr) * v.v2 + 2 * (
-    #                 q.qi * q.qk + q.qj * q.qr) * v.v3
-    #     xdot.y = (1 - 2 * q.qk ** 2 - 2 * q.qi ** 2) * v.v2 + 2 * (q.qj * q.qk - q.qi * q.qr) * v.v3 + 2 * (
-    #                 q.qj * q.qi + q.qk * q.qr) * v.v1
-    #     xdot.z = (1 - 2 * q.qi ** 2 - 2 * q.qj ** 2) * v.v3 + 2 * (q.qk * q.qi - q.qj * q.qr) * v.v1 + 2 * (
-    #                 q.qk * q.qj + q.qi * q.qr) * v.v2
-    #     return xdot
-
 @dataclass
 class VehicleActuation(PythonMsg):
     t: float = field(default = 0)
@@ -103,30 +93,6 @@ class VehicleActuation(PythonMsg):
 
     def __str__(self):
         return 't:{self.t}, u_a:{self.u_a}, u_steer:{self.u_steer}'.format(self=self)
-
-@dataclass
-class TrackLookahead(PythonMsg):
-    '''
-    Local track information ahead of the vehicle (curvature)
-    '''
-    t: float = field(default = None)    # time in seconds
-
-    l: float = field(default = None)    # length of lookahead in meters
-    dl: float = field(default = None)   # discretization step-size of the lookahead
-    n: int = field(default = None)    # length of lookahead in array entries
-
-    # TODO Add field for segmented lookahead?
-    curvature: array.array = field(default = None)  # the curvature lookahead
-
-    def __post_init__(self):
-        if self.l is None: self.l = 1
-        if self.dl is None: self.dl = 0.1
-        self.n = int(round(self.l/self.dl))
-        dummyList = self.n*[1.0]
-        self.curvature = array.array("d")
-        self.curvature.extend(dummyList)
-
-    # TODO: should this be updated from within the class? e.g. call the update every time-step? Probably not
 
 @dataclass
 class BodyLinearVelocity(PythonMsg):
@@ -269,7 +235,6 @@ class VehicleState(PythonMsg):
 
     u: VehicleActuation = field(default=None)
 
-    lookahead: TrackLookahead = field(default=None) # TODO Find a good field name :(
 
     lap_num: int = field(default = None)
 
@@ -281,7 +246,6 @@ class VehicleState(PythonMsg):
     def __post_init__(self):
         if self.x is None: self.x = Position()
         if self.u is None: self.u = VehicleActuation()
-        if self.lookahead is None: self.lookahead = TrackLookahead()
         if self.v is None: self.v = BodyLinearVelocity()
         if self.w is None: self.w = BodyAngularVelocity()
         if self.a is None: self.a = BodyLinearAcceleration()
@@ -291,25 +255,6 @@ class VehicleState(PythonMsg):
         if self.p is None: self.p = ParametricPose()
         if self.pt is None: self.pt = ParametricVelocity()
         return
-
-    def get_R(self, reverse = False):
-        #Warning - Not suitable for general 3D case
-        psi = self.psi
-        return np.array([[np.cos(psi), -np.sin(psi),0],[np.sin(psi),np.cos(psi),0],[0,0,0]])
-
-    # Single operation with rotation matrix
-    # def update_body_velocity_from_global(self):
-    #     self.v_long =  self.v_x * np.cos(self.psi) + self.v_y * np.sin(self.psi)
-    #     self.v_tran = -self.v_x * np.sin(self.psi) + self.v_y * np.cos(self.psi)
-    #     self.a_long =  self.a_x * np.cos(self.psi) + self.a_y * np.sin(self.psi)
-    #     self.a_tran = -self.a_y * np.sin(self.psi) + self.a_y + np.cos(self.psi)
-    #
-    # def update_global_velocity_from_body(self):
-    #     self.v_x =  self.v_long * np.cos(self.psi) - self.v_tran * np.sin(self.psi)
-    #     self.v_y =  self.v_long * np.sin(self.psi) + self.v_tran * np.cos(self.psi)
-    #     self.a_x =  self.a_long * np.cos(self.psi) - self.a_tran * np.sin(self.psi)
-    #     self.a_y =  self.a_long * np.sin(self.psi) + self.a_tran * np.cos(self.psi)
-
     def pack_list(self, use_numpy = False):
         '''
         Takes in a list or array of VehicleState objects and creates a single VehicleState object where each field is a np.array of the fields of the original list
@@ -371,20 +316,3 @@ class VehiclePrediction(PythonMsg):
     u_steer: array.array = field(default = None)  # steering angle output
 
     lap_num: int = field(default = None)
-
-    #TODO: Maybe need a different way of storing the covariance matricies
-    # For covariances, only store the upper triangular part
-    local_state_covariance: array.array = field(default = None) # Vectorized upper triangular part of covariance matrix with main diagonal order [v_long, v_tran, psidot, e_psi, s, e_y]
-    global_state_covariance: array.array = field(default = None) # Vectorized upper triangular part of covariance matrix with main diagonal order [x, y, psi, v_long, v_tran, psidot]
-
-    def update_body_velocity_from_global(self):
-        self.v_long =  (np.multiply(self.v_x, np.cos(self.psi)) + np.multiply(self.v_y, np.sin(self.psi))).tolist()
-        self.v_tran = (-np.multiply(self.v_x, np.sin(self.psi)) + np.multiply(self.v_y, np.cos(self.psi))).tolist()
-        self.a_long =  (np.multiply(self.a_x, np.cos(self.psi)) + np.multiply(self.a_y, np.sin(self.psi))).tolist()
-        self.a_tran = (-np.multiply(self.a_y, np.sin(self.psi)) + np.multiply(self.a_y, np.cos(self.psi))).tolist()
-
-    def update_global_velocity_from_body(self):
-        self.v_x =  (np.multiply(self.v_long, np.cos(self.psi)) - np.multiply(self.v_tran, np.sin(self.psi))).tolist()
-        self.v_y =  (np.multiply(self.v_long, np.sin(self.psi)) + np.multiply(self.v_tran, np.cos(self.psi))).tolist()
-        self.a_x =  (np.multiply(self.a_long, np.cos(self.psi)) - np.multiply(self.a_tran, np.sin(self.psi))).tolist()
-        self.a_y =  (np.multiply(self.a_long, np.sin(self.psi)) + np.multiply(self.a_tran, np.cos(self.psi))).tolist()

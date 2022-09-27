@@ -2,7 +2,7 @@ from distutils.core import setup
 
 setup(
     name="DGSQP",
-    version="0.1",
+    version="0.2",
     author='Edward Zhu',
     author_email='edward.zhu@berkeley.edu',
     description='A Python implementation of the Dynamic Game SQP algorithm',
@@ -12,8 +12,7 @@ setup(
           'numpy',
           'scipy',
           'matplotlib',
-          'osqp',
-          'pyqtgraph'
+          'osqp'
       ],
     package_dir={'DGSQP': 'DGSQP'}
 )

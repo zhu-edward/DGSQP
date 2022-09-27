@@ -24,10 +24,13 @@ import copy
 # Initial time
 t = 0
 
-time_str = datetime.now().strftime('%m-%d-%Y_%H-%M-%S')
-data_dir = pathlib.Path(pathlib.Path.home(), f'results/dgsqp_algams_mc_chicane_{time_str}')
-if not data_dir.exists():
-    data_dir.mkdir(parents=True)
+save_data = False
+
+if save_data:
+    time_str = datetime.now().strftime('%m-%d-%Y_%H-%M-%S')
+    data_dir = pathlib.Path(pathlib.Path.home(), f'results/dgsqp_algams_mc_chicane_{time_str}')
+    if not data_dir.exists():
+        data_dir.mkdir(parents=True)
 
 # =============================================
 # Helper functions
@@ -120,17 +123,17 @@ tar_cost_params = dict(input_weight=[1.0, 1.0],
                         obs_weight=0,
                         obs_r=0.3)
 
-ego_r=0.2
-tar_r=0.2
+ego_r=0.4
+tar_r=0.4
 
 use_ws=True
 ibr_ws=False
 
-exp_N = [10, 15, 20, 25]
-exp_theta = np.arange(15, 91, 15)
-# exp_N = [25]
-# exp_theta = [90]
-num_mc = 100
+# exp_N = [10, 15, 20, 25]
+# exp_theta = np.arange(15, 91, 15)
+exp_N = [25]
+exp_theta = [45]
+num_mc = 1
 rng = np.random.default_rng()
 
 for theta in exp_theta:
@@ -167,10 +170,6 @@ for theta in exp_theta:
                                             beta=0.01,
                                             tau=0.5,
                                             verbose=False,
-                                            code_gen=False,
-                                            jit=False,
-                                            opt_flag='O3',
-                                            solver_dir=None,
                                             debug_plot=False,
                                             pause_on_plot=True)
         algames_params = ALGAMESParams(solver_name='ALGAMES',
@@ -192,10 +191,6 @@ for theta in exp_theta:
                                             q_reg=1e-3,
                                             u_reg=1e-3,
                                             verbose=False,
-                                            code_gen=False,
-                                            jit=False,
-                                            opt_flag='O3',
-                                            solver_dir=None,
                                             debug_plot=False,
                                             pause_on_plot=False)
 
@@ -371,10 +366,6 @@ for theta in exp_theta:
                                     p_tol=1e-3,
                                     d_tol=1e-3,
                                     verbose=False,
-                                    code_gen=False,
-                                    jit=False,
-                                    opt_flag='O3',
-                                    solver_dir=None,
                                     debug_plot=False,
                                     pause_on_plot=True)
             ibr_solver = IBR(joint_model, 
@@ -418,34 +409,32 @@ for theta in exp_theta:
                 if use_ws:
                     # Set up PID controllers for warm start
                     ego_steer_params = PIDParams(dt=dt, Kp=1.0, Ki=0.005,
+                                                x_ref=ego_sim_state.p.x_tran,
                                                 u_max=ego_state_input_max.u.u_steer, 
                                                 u_min=ego_state_input_min.u.u_steer, 
                                                 du_max=ego_state_input_rate_max.u.u_steer, 
                                                 du_min=ego_state_input_rate_min.u.u_steer)
                     ego_speed_params = PIDParams(dt=dt, Kp=1.0, 
+                                                x_ref=ego_sim_state.v.v_long,
                                                 u_max=ego_state_input_max.u.u_a, 
                                                 u_min=ego_state_input_min.u.u_a, 
                                                 du_max=ego_state_input_rate_max.u.u_a, 
                                                 du_min=ego_state_input_rate_min.u.u_a)
-                    ego_v_ref = ego_sim_state.v.v_long
-                    # ego_v_ref = tar_sim_state.v.v_long
-                    ego_x_ref = ego_sim_state.p.x_tran
-                    ego_pid_controller = PIDLaneFollower(ego_v_ref, ego_x_ref, dt, ego_steer_params, ego_speed_params)
+                    ego_pid_controller = PIDLaneFollower(dt, ego_steer_params, ego_speed_params)
 
                     tar_steer_params = PIDParams(dt=dt, Kp=1.0, Ki=0.005,
+                                                x_ref=tar_sim_state.p.x_tran,
                                                 u_max=tar_state_input_max.u.u_steer, 
                                                 u_min=tar_state_input_min.u.u_steer, 
                                                 du_max=tar_state_input_rate_max.u.u_steer, 
                                                 du_min=tar_state_input_rate_min.u.u_steer)
                     tar_speed_params = PIDParams(dt=dt, Kp=1.0, 
+                                                x_ref=tar_sim_state.v.v_long,
                                                 u_max=tar_state_input_max.u.u_a, 
                                                 u_min=tar_state_input_min.u.u_a, 
                                                 du_max=tar_state_input_rate_max.u.u_a, 
                                                 du_min=tar_state_input_rate_min.u.u_a)
-                    tar_v_ref = tar_sim_state.v.v_long
-                    tar_x_ref = tar_sim_state.p.x_tran
-                    # tar_x_ref = ego_sim_state.p.x_tran
-                    tar_pid_controller = PIDLaneFollower(tar_v_ref, tar_x_ref, dt, tar_steer_params, tar_speed_params)
+                    tar_pid_controller = PIDLaneFollower(dt, tar_steer_params, tar_speed_params)
 
                     # Construct initial guess for ALGAMES MPC with PID
                     ego_state = [copy.deepcopy(ego_sim_state)]
@@ -515,7 +504,8 @@ for theta in exp_theta:
                         agent_dyn_configs=[ego_dynamics_config, tar_dynamics_config],
                         joint_model_config=joint_model_config)
 
-        filename = f'data_c_{theta}_N_{N}.pkl'
-        data_path = data_dir.joinpath(filename)
-        with open(data_path, 'wb') as f:
-            pickle.dump(results, f)
+        if save_data:
+            filename = f'data_c_{theta}_N_{N}.pkl'
+            data_path = data_dir.joinpath(filename)
+            with open(data_path, 'wb') as f:
+                pickle.dump(results, f)

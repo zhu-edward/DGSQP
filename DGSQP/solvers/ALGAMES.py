@@ -1,13 +1,9 @@
 #!/usr/bin python3
 
 import numpy as np
-import scipy as sp
 import casadi as ca
 
-import pathlib
-import os
 import copy
-import shutil
 import pdb
 from datetime import datetime
 
@@ -28,40 +24,44 @@ class ALGAMES(AbstractSolver):
                        costs: List[Dict[str, ca.Function]], 
                        constraints: List[ca.Function], 
                        bounds: Dict[str, VehicleState],
-                       params=ALGAMESParams()):
+                       params=ALGAMESParams(),
+                       xy_plot=None):
         self.joint_dynamics = joint_dynamics
         self.M = self.joint_dynamics.n_a
 
-        self.N = params.N
+        self.N                  = params.N
 
-        self.outer_iters = params.outer_iters
-        self.line_search_iters = params.line_search_iters
-        self.newton_iters = params.newton_iters
+        self.outer_iters        = params.outer_iters
+        self.line_search_iters  = params.line_search_iters
+        self.newton_iters       = params.newton_iters
 
-        self.verbose = params.verbose
-        self.code_gen = params.code_gen
-        self.jit = params.jit
-        self.opt_flag = params.opt_flag
-        self.solver_name = params.solver_name
-        if params.solver_dir is not None:
-            self.solver_dir = os.path.join(params.solver_dir, self.solver_name)
+        self.dynamics_hessians  = params.dynamics_hessians
+        
+        # Convergence tolerance for Newton's method
+        self.ineq_tol           = params.ineq_tol
+        self.eq_tol             = params.eq_tol
+        self.opt_tol            = params.opt_tol
+        self.newton_step_tol    = params.newton_step_tol
+        self.rel_tol_req        = 5
 
-        if not params.enable_jacobians:
-            jac_opts = dict(enable_fd=False, enable_jacobian=False, enable_forward=False, enable_reverse=False)
-        else:
-            jac_opts = dict()
+        # Lagrangian Regularization
+        self.rho_init           = params.rho
+        self.gamma              = params.gamma
+        self.rho_val            = copy.copy(self.rho_init)
+        self.rho_max            = params.rho_max
+        self.lam_max            = params.lam_max
 
-        if self.code_gen:
-            if self.jit:
-                self.options = dict(jit=True, jit_name=self.solver_name, compiler='shell', jit_options=dict(compiler='gcc', flags=['-%s' % self.opt_flag], verbose=self.verbose), **jac_opts)
-            else:
-                self.options = dict(jit=False, **jac_opts)
-                self.c_file_name = self.solver_name + '.c'
-                self.so_file_name = self.solver_name + '.so'
-                if params.solver_dir is not None:
-                    self.solver_dir = pathlib.Path(params.solver_dir).expanduser().joinpath(self.solver_name)
-        else:
-            self.options = dict(jit=False, **jac_opts)
+        # Jacobian regularization
+        self.q_reg_init         = params.q_reg
+        self.u_reg_init         = params.u_reg
+
+        # Line search parameters
+        self.beta               = params.beta
+        self.tau                = params.tau
+        self.line_search_tol    = params.line_search_tol
+
+        self.verbose            = params.verbose
+        self.solver_name        = params.solver_name
 
         # The costs should be a dict of casadi functions with keys 'stage' and 'terminal'
         if len(costs) != self.M:
@@ -81,36 +81,11 @@ class ALGAMES(AbstractSolver):
         self.input_lb_idxs = np.where(self.input_lb > -np.inf)[0]
 
         self.n_c = 0
-        # for k in range(self.N+1):
-        #     self.n_c += self.constraints_sym[k].size1_out(0) # Number of constraints
 
         self.state_input_predictions = [VehiclePrediction() for _ in range(self.M)]
 
         self.n_u = self.joint_dynamics.n_u
         self.n_q = self.joint_dynamics.n_q
-
-        self.newton_step_tol = params.newton_step_tol
-        # Convergence tolerance for Newton's method
-        self.ineq_tol = params.ineq_tol
-        self.eq_tol = params.eq_tol
-        self.opt_tol = params.opt_tol
-        self.rel_tol_req = 5
-
-        # Lagrangian Regularization
-        self.rho_init = params.rho
-        self.gamma = params.gamma
-        self.rho_val = copy.copy(self.rho_init)
-        self.rho_max = params.rho_max
-        self.lam_max = params.lam_max
-
-        # Jacobian regularization
-        self.q_reg_init = params.q_reg
-        self.u_reg_init = params.u_reg
-
-        # Line search parameters
-        self.beta = params.beta
-        self.tau = params.tau
-        self.line_search_tol = params.line_search_tol
 
         self.debug_plot = params.debug_plot
         self.pause_on_plot = params.pause_on_plot
@@ -122,8 +97,8 @@ class ALGAMES(AbstractSolver):
             self.ax_xy = self.fig.add_subplot(1,2,1)
             self.ax_a = self.fig.add_subplot(2,2,2)
             self.ax_s = self.fig.add_subplot(2,2,4)
-            # self.joint_dynamics.dynamics_models[0].track.remove_phase_out()
-            self.joint_dynamics.dynamics_models[0].track.plot_map(self.ax_xy, close_loop=False)
+            if xy_plot is not None:
+                xy_plot(self.ax_xy)
             self.colors = ['b', 'g', 'r', 'm', 'c']
             self.l_xy, self.l_a, self.l_s = [], [], []
             for i in range(self.M):
@@ -134,7 +109,10 @@ class ALGAMES(AbstractSolver):
             self.ax_s.set_ylabel('steering')
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
-            
+        
+        self.num_qa_d = [int(self.joint_dynamics.dynamics_models[a].n_q) for a in range(self.M)]
+        self.num_ua_d = [int(self.joint_dynamics.dynamics_models[a].n_u) for a in range(self.M)]
+
         self.q_pred = np.zeros((self.N+1, self.n_q))
         self.u_pred = np.zeros((self.N, self.n_u))
 
@@ -147,10 +125,7 @@ class ALGAMES(AbstractSolver):
 
         self.u_prev = np.zeros(self.n_u)
 
-        if params.solver_dir:
-            self._load_solver()
-        else:
-            self._build_solver()
+        self._build_solver()
 
         self.initialized = True
 
@@ -232,19 +207,23 @@ class ALGAMES(AbstractSolver):
             if self.verbose:
                 print('===================================================')
                 print(f'ALGAMES iteration: {i}')
-            
+
+            if self.debug_plot:
+                self._update_debug_plot(q_bar, u_bar)
+                if self.pause_on_plot:
+                    pdb.set_trace()
+
             u_im1 = copy.copy(u_bar)
             l_im1 = copy.copy(lam_bar)
             m_im1 = copy.copy(mu_bar)
 
-            # Compute constraint violation for initial guess and construct inital regularization matrix
-            C_bar = self.f_C(*ca.horzsplit(q_bar, 1), *ca.horzsplit(u_bar, 1))
-            rho_bar = ca.DM([0 if c < 0 and l == 0 else self.rho_val for (c, l) in zip(ca.vertsplit(C_bar), ca.vertsplit(lam_bar))])
-            # rho_bar = ca.DM([0 if c < -1e-7 and l < 1e-7 else self.rho_val for (c, l) in zip(ca.vertsplit(C_bar), ca.vertsplit(lam_bar))])
-
             # Newton's method w/ backtracking line search
             newton_converged = False
             for j in range(self.newton_iters):
+                # Compute constraint violation and construct regularization matrix
+                C_bar = self.f_C(*ca.horzsplit(q_bar, 1), *ca.horzsplit(u_bar, 1))
+                rho_bar = ca.DM([0 if c < 0 and l == 0 else self.rho_val for (c, l) in zip(ca.vertsplit(C_bar), ca.vertsplit(lam_bar))])
+                
                 # Scheduled increase of regularization
                 q_reg_it = q_reg*(j+1)**4 
                 u_reg_it = u_reg*(j+1)**4
@@ -256,9 +235,16 @@ class ALGAMES(AbstractSolver):
                             rho_bar,
                             q_reg_it,
                             u_reg_it)
-                if ca.norm_inf(Gy) < self.opt_tol:
+
+                opt_vio = np.linalg.norm(self.f_opt(*ca.horzsplit(q_bar, 1), 
+                            *ca.horzsplit(u_bar, 1),
+                            *ca.horzsplit(mu_bar, 1),
+                            lam_bar,
+                            rho_bar), ord=np.inf)
+                
+                if opt_vio < self.opt_tol:
                     if self.verbose:
-                        print(f' - Newton iteration: {j} | G norm: {np.linalg.norm(Gy, ord=np.inf):.4e} | converged: Gradient of Lagrangian within specified tolerance')
+                        print(f' - Newton iteration: {j} | stat: {opt_vio:.4e} | converged: Gradient of Lagrangian within specified tolerance')
                     newton_converged = True
                     newton_status = 'stat_size'
                     Gy_bar = ca.DM(Gy)
@@ -286,8 +272,7 @@ class ALGAMES(AbstractSolver):
                     norm_Gy_trial = np.linalg.norm(Gy_trial, ord=1)/Gy_trial.size1()
                     norm_Gy_thresh = (1-alpha*self.beta)*norm_Gy
                     if self.verbose:
-                        print(f'   - Line search iteration: {k} | LS G norm: {norm_Gy_trial:.4e} | G norm: {norm_Gy_thresh:.4e} | a: {alpha:.4e}')
-                    # if norm_Gy_trial-norm_Gy_thresh <= 1e-3:
+                        print(f'   - Line search iteration: {k} | LS G norm: {norm_Gy_trial:.4e} | G norm: {norm_Gy:.4e} | a: {alpha:.4e}')
                     if norm_Gy_trial <= norm_Gy_thresh:
                         line_search_converged = True
                         break
@@ -308,8 +293,8 @@ class ALGAMES(AbstractSolver):
                     d += (np.linalg.norm(dq[:,k], ord=1) + np.linalg.norm(du[:,k], ord=1))
                 d *= (alpha/((self.n_q + self.n_u)*self.N))
 
-                if self.debug:
-                    pdb.set_trace()
+                if self.verbose:
+                    print(f' - Newton iteration: {j} | G norm: {np.linalg.norm(Gy_bar, ord=np.inf):.4e} | step size: {d:.4e} | reg: {u_reg_it:.4e}')
 
                 # Check for convergence
                 if d < self.newton_step_tol:
@@ -319,8 +304,6 @@ class ALGAMES(AbstractSolver):
                     newton_status = 'step_size'
                     break
                 
-                if self.verbose:
-                    print(f' - Newton iteration: {j} | G norm: {np.linalg.norm(Gy_bar, ord=np.inf):.4e} | step size: {d:.4e} | reg: {u_reg_it:.4e}')
             newton_solves = j + 1
             if newton_solves == self.newton_iters:
                 newton_status = 'max_it'
@@ -334,7 +317,8 @@ class ALGAMES(AbstractSolver):
             max_opt_vio = np.linalg.norm(self.f_opt(*ca.horzsplit(q_bar, 1), 
                             *ca.horzsplit(u_bar, 1),
                             *ca.horzsplit(mu_bar, 1),
-                            lam_bar), ord=np.inf)
+                            lam_bar,
+                            rho_bar), ord=np.inf)
             comp = float(ca.dot(lam_bar, ineq_val))
             cond = {'p_feas': max(max_ineq_vio, max_eq_vio), 'd_feas': 0, 'comp': comp, 'stat': max_opt_vio}
 
@@ -426,10 +410,6 @@ class ALGAMES(AbstractSolver):
 
             if self.debug:
                 pdb.set_trace()
-            if self.debug_plot:
-                self._update_debug_plot(q_bar, u_bar)
-                if self.pause_on_plot:
-                    pdb.set_trace()
 
         if not converged and i == self.outer_iters-1:
             if self.verbose:
@@ -445,7 +425,7 @@ class ALGAMES(AbstractSolver):
         print(f'Solve iters: {i+1}')
         print(f'Solve time: {solve_dur}')
         J = self.f_J(*ca.horzsplit(q_bar, 1), *ca.horzsplit(u_bar, 1))
-        print('Cost: ' + str(J))
+        print(str(J))
 
         solve_info['time'] = solve_dur
         solve_info['num_iters'] = i+1
@@ -539,21 +519,20 @@ class ALGAMES(AbstractSolver):
         Lr = []
         for i in range(self.M):
             Lr.append(J[i] + ca.dot(m_ph[i], D) + ca.dot(l_ph, C))
-        opt = []
-        for i in range(self.M):
-            opt_qi, opt_ui = [], []
-            for k in range(self.N):
-                opt_qi.append(ca.jacobian(Lr[i], q_ph[k+1]).T)
-                opt_ui.append(ca.jacobian(Lr[i], ui_ph[i][k]).T)
-            # pdb.set_trace()
-            opt.append(ca.vertcat(*opt_qi, *opt_ui))
-        opt = ca.vertcat(*opt)
-        self.f_opt = ca.Function('opt', q_ph + u_ph + m_ph + [l_ph], [opt])
-
 
         L = []
         for i in range(self.M):
             L.append(J[i] + ca.dot(m_ph[i], D) + ca.dot(l_ph, C) + ca.bilin(ca.diag(reg_ph), C, C)/2)
+        opt = []
+        for i in range(self.M):
+            opt_qi, opt_ui = [], []
+            for k in range(self.N):
+                opt_qi.append(ca.jacobian(L[i], q_ph[k+1]).T)
+                opt_ui.append(ca.jacobian(L[i], ui_ph[i][k]).T)
+            # pdb.set_trace()
+            opt.append(ca.vertcat(*opt_qi, *opt_ui))
+        opt = ca.vertcat(*opt)
+        self.f_opt = ca.Function('opt', q_ph + u_ph + m_ph + [l_ph, reg_ph], [opt])
 
         # Gradient of agent Lagrangian w.r.t. joint state and agent input
         G = []
@@ -572,73 +551,41 @@ class ALGAMES(AbstractSolver):
         for i in range(self.M):
             G_qi, G_ui = [], []
             for k in range(self.N):
-                G_qi.append(ca.jacobian(L[i], q_ph[k+1]).T + jac_reg_q_ph*(q_ph[k+1]-q_ref_ph[k+1]))
-                G_ui.append(ca.jacobian(L[i], ui_ph[i][k]).T + jac_reg_u_ph*(ui_ph[i][k]-ui_ref_ph[i][k]))
+                G_qi.append(ca.jacobian(L[i] + 0.5*jac_reg_q_ph*ca.bilin(ca.DM.eye(self.n_q), q_ph[k+1]-q_ref_ph[k+1], q_ph[k+1]-q_ref_ph[k+1]), q_ph[k+1]).T)
+                G_ui.append(ca.jacobian(L[i] + 0.5*jac_reg_q_ph*ca.bilin(ca.DM.eye(self.num_ua_d[i]), ui_ph[i][k]-ui_ref_ph[i][k], ui_ph[i][k]-ui_ref_ph[i][k]), ui_ph[i][k]).T)
             G_reg.append(ca.vertcat(*G_qi, *G_ui))
         G_reg = ca.vertcat(*G_reg, D)
         self.f_G_reg = ca.Function('G_reg', q_ph + u_ph + m_ph + [l_ph, reg_ph, jac_reg_q_ph, jac_reg_u_ph] + q_ref_ph + u_ref_ph, [G_reg])
+        
+        # Ignore dynamics hessians
+        G2 = []
+        for i in range(self.M):
+            G_qi, G_ui = [], []
+            for k in range(self.N):
+                G_qi.append(ca.jacobian(J[i] + ca.dot(l_ph, C) + ca.bilin(ca.diag(reg_ph), C, C)/2, q_ph[k+1]).T)
+                G_ui.append(ca.jacobian(J[i] + ca.dot(l_ph, C) + ca.bilin(ca.diag(reg_ph), C, C)/2, ui_ph[i][k]).T)
+            G2.append(ca.vertcat(*G_qi, *G_ui))
+        G2 = ca.vertcat(*G2, D)
 
         # Gradient of G w.r.t. state trajectory (not including initial state), input sequence, and eq constraint multipliers
-        y = ca.vertcat(*q_ph[1:], *u_ph[:-1], *m_ph)
-        H = ca.jacobian(G, y)
+        if self.dynamics_hessians:
+            y = ca.vertcat(*q_ph[1:], *u_ph[:-1], *m_ph)
+            H = ca.jacobian(G, y)
+        else:
+            prim = ca.vertcat(*q_ph[1:], *u_ph[:-1])
+            dual = ca.vertcat(*m_ph)
+            H = ca.horzcat(ca.jacobian(G2, prim), ca.jacobian(G, dual))
         reg = ca.vertcat(jac_reg_q_ph*ca.DM.ones(self.n_q*self.N), jac_reg_u_ph*ca.DM.ones(self.n_u*self.N), ca.DM.zeros(self.n_q*self.N*self.M))
         H_reg = H + ca.diag(reg)
         self.f_H = ca.Function('H', q_ph + u_ph + m_ph + [l_ph, reg_ph, jac_reg_q_ph, jac_reg_u_ph], [H_reg])
         
         # Search direction
         dy = -ca.solve(H_reg, G, 'lapacklu')
-        # dy = -ca.solve(H_reg, G)
 
         dq = ca.reshape(dy[:self.n_q*self.N], (self.n_q, self.N))
         du = ca.reshape(dy[self.n_q*self.N:self.n_q*self.N+self.n_u*self.N], (self.n_u, self.N))
         dm = ca.reshape(dy[self.n_q*self.N+self.n_u*self.N:], (self.n_q*self.N, self.M))
         self.f_dy = ca.Function('dy', q_ph + u_ph + m_ph + [l_ph, reg_ph, jac_reg_q_ph, jac_reg_u_ph], [dq, du, dm, G])
-
-        if self.code_gen and not self.jit:
-            generator = ca.CodeGenerator(self.c_file_name)
-            generator.add(self.f_dy)
-            generator.add(self.f_J)
-            generator.add(self.f_G)
-            generator.add(self.f_C)
-            generator.add(self.f_CD)
-
-            # Set up paths
-            cur_dir = pathlib.Path.cwd()
-            gen_path = cur_dir.joinpath(self.solver_name)
-            c_path = gen_path.joinpath(self.c_file_name)
-            if gen_path.exists():
-                shutil.rmtree(gen_path)
-            gen_path.mkdir(parents=True)
-
-            os.chdir(gen_path)
-            if self.verbose:
-                print('- Generating C code for solver %s at %s' % (self.solver_name, str(gen_path)))
-            generator.generate()
-            pdb.set_trace()
-            # Compile into shared object
-            so_path = gen_path.joinpath(self.so_file_name)
-            if self.verbose:
-                print('- Compiling shared object %s from %s' % (so_path, c_path))
-                print('- Executing "gcc -fPIC -shared -%s %s -o %s"' % (self.opt_flag, c_path, so_path))
-            os.system('gcc -fPIC -shared -%s %s -o %s' % (self.opt_flag, c_path, so_path))
-
-            # Swtich back to working directory
-            os.chdir(cur_dir)
-            install_dir = self.install()
-
-            # Load solver
-            self._load_solver(install_dir.joinpath(self.so_file_name))
-
-    def _load_solver(self, solver_path=None):
-        if solver_path is None:
-            solver_path = pathlib.Path(self.solver_dir, self.so_file_name).expanduser()
-        if self.verbose:
-            print('- Loading solver from %s' % str(solver_path))
-        self.f_dy = ca.external('dy', str(solver_path))
-        self.f_G = ca.external('G', str(solver_path))
-        self.f_C = ca.external('C', str(solver_path))
-        self.f_J = ca.external('J', str(solver_path))
-        self.f_CD = ca.external('CD', str(solver_path))
 
     def get_prediction(self) -> List[VehiclePrediction]:
         return self.state_input_predictions
@@ -650,6 +597,8 @@ class ALGAMES(AbstractSolver):
         else:
             raise NotImplementedError('Conversion from local to global pos has not been implemented for debug plot')
         self.ax_xy.set_aspect('equal')
+        self.ax_xy.relim()
+        self.ax_xy.autoscale_view()
         J = self.f_J(*ca.horzsplit(q_nom, 1), *ca.horzsplit(u_nom, 1))
         self.ax_xy.set_title(str(J))
         for i in range(self.M):
