@@ -5,7 +5,7 @@ import pathlib
 import pickle
 import os
 
-from mpclab_common.track import get_track
+from DGSQP.tracks.track_lib import get_track
 
 import matplotlib.pyplot as plt
 import matplotlib
