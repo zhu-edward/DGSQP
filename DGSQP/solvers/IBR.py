@@ -3,7 +3,10 @@
 import numpy as np
 import casadi as ca
 
+import pathlib
+import os
 import copy
+import shutil
 import pdb
 import warnings
 from datetime import datetime
@@ -26,17 +29,47 @@ class IBR(AbstractSolver):
                        agent_constraints: List[ca.Function], 
                        shared_constraints: List[ca.Function],
                        bounds: Dict[str, VehicleState],
-                       params=IBRParams()):
+                       params=IBRParams(),
+                       print_method=print,
+                       xy_plot=None):
         self.joint_dynamics = joint_dynamics
         self.M = self.joint_dynamics.n_a
+        if print_method is None:
+            self.print_method = lambda s: None
+        else:
+            self.print_method = print_method
 
         self.N = params.N
 
         self.line_search_iters = params.line_search_iters
         self.ibr_iters = params.ibr_iters
 
+        self.linear_solver = params.linear_solver
+
         self.verbose = params.verbose
+        self.code_gen = params.code_gen
+        self.jit = params.jit
+        self.opt_flag = params.opt_flag
         self.solver_name = params.solver_name
+        if params.solver_dir is not None:
+            self.solver_dir = os.path.join(params.solver_dir, self.solver_name)
+
+        if not params.enable_jacobians:
+            jac_opts = dict(enable_fd=False, enable_jacobian=False, enable_forward=False, enable_reverse=False)
+        else:
+            jac_opts = dict()
+
+        if self.code_gen:
+            if self.jit:
+                self.options = dict(jit=True, jit_name=self.solver_name, compiler='shell', jit_options=dict(compiler='gcc', flags=['-%s' % self.opt_flag], verbose=self.verbose), **jac_opts)
+            else:
+                self.options = dict(jit=False, **jac_opts)
+                self.c_file_name = self.solver_name + '.c'
+                self.so_file_name = self.solver_name + '.so'
+                if params.solver_dir is not None:
+                    self.solver_dir = pathlib.Path(params.solver_dir).expanduser().joinpath(self.solver_name)
+        else:
+            self.options = dict(jit=False, **jac_opts)
 
         self.num_qa_d = [int(self.joint_dynamics.dynamics_models[a].n_q) for a in range(self.M)]
         self.num_ua_d = [int(self.joint_dynamics.dynamics_models[a].n_u) for a in range(self.M)]
@@ -48,6 +81,8 @@ class IBR(AbstractSolver):
         self.costs_sym = costs
 
         # The constraints should be a list (of length N+1) of casadi functions such that constraints[i] <= 0
+        # if len(constraints) != self.N+1:
+        #     raise ValueError('Horizon length: %i, but %i constraint functions were provided' % (self.N+1, len(constraints)))
         self.constraints_sym = agent_constraints
         self.shared_constraints_sym = shared_constraints
         
@@ -85,26 +120,6 @@ class IBR(AbstractSolver):
 
         self.debug_plot = params.debug_plot
         self.pause_on_plot = params.pause_on_plot
-        self.local_pos = params.local_pos
-        if self.debug_plot:
-            matplotlib.use('TkAgg')
-            plt.ion()
-            self.fig = plt.figure(figsize=(10,5))
-            self.ax_xy = self.fig.add_subplot(1,2,1)
-            self.ax_a = self.fig.add_subplot(2,2,2)
-            self.ax_s = self.fig.add_subplot(2,2,4)
-            # self.joint_dynamics.dynamics_models[0].track.remove_phase_out()
-            self.joint_dynamics.dynamics_models[0].track.plot_map(self.ax_xy, close_loop=False)
-            self.colors = ['b', 'g', 'r', 'm', 'c']
-            self.l_xy, self.l_a, self.l_s = [], [], []
-            for i in range(self.M):
-                self.l_xy.append(self.ax_xy.plot([], [], f'{self.colors[i]}o')[0])
-                self.l_a.append(self.ax_a.plot([], [], f'-{self.colors[i]}o')[0])
-                self.l_s.append(self.ax_s.plot([], [], f'-{self.colors[i]}o')[0])
-            self.ax_a.set_ylabel('accel')
-            self.ax_s.set_ylabel('steering')
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
             
         self.q_pred = np.zeros((self.N+1, self.n_q))
         self.u_pred = np.zeros((self.N, self.n_u))
@@ -116,7 +131,10 @@ class IBR(AbstractSolver):
 
         self.u_prev = np.zeros(self.n_u)
 
-        self._build_solver()
+        if params.solver_dir:
+            self._load_solver()
+        else:
+            self._build_solver()
         
         self.u_ws = [np.zeros((self.N, self.num_ua_d[a])) for a in range(self.M)]
         if self.use_ps and self.alpha > 0:
@@ -126,6 +144,35 @@ class IBR(AbstractSolver):
         self.l_pred = copy.copy(self.l_ws)
 
         self.initialized = True
+
+        if self.debug_plot:
+            plt.ion()
+            self.fig = plt.figure(figsize=(20,10))
+            
+            self.ax_xy = self.fig.add_subplot(1, 1+self.M, 1)
+            self.ax_q = [[self.fig.add_subplot(self.num_qa_d[i]+self.num_ua_d[i], 1+self.M, i+2 + j*(1+self.M)) for j in range(self.num_qa_d[i])] for i in range(self.M)]
+            self.ax_u = [[self.fig.add_subplot(self.num_qa_d[i]+self.num_ua_d[i], 1+self.M, i+2 + (j+self.num_qa_d[i])*(1+self.M)) for j in range(self.num_ua_d[i])] for i in range(self.M)]
+            
+            self.l_xy = []
+            self.l_q = [[] for _ in range(self.M)]
+            self.l_u = [[] for _ in range(self.M)]
+
+            if xy_plot is not None:
+                xy_plot(self.ax_xy)
+
+            for i in range(self.M):
+                self.l_xy.append(self.ax_xy.plot([], [], 'o')[0])
+                self.ax_q[i][0].set_title(f'Agent {i+1}')
+                for j in range(self.num_qa_d[i]):
+                    self.l_q[i].append(self.ax_q[i][j].plot([], [], 'o')[0])
+                    self.ax_q[i][j].set_ylabel(f'State {j+1}')
+                    self.ax_q[i][j].get_xaxis().set_ticks([])
+                for j in range(self.num_ua_d[i]):
+                    self.l_u[i].append(self.ax_u[i][j].plot([], [], 's')[0])
+                    self.ax_u[i][j].set_ylabel(f'Input {j+1}')
+                    self.ax_u[i][j].get_xaxis().set_ticks([])
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
 
     def initialize(self):
         pass
@@ -171,6 +218,15 @@ class IBR(AbstractSolver):
         x0 = self.joint_dynamics.state2q(states)
         up = copy.copy(self.u_prev)
         u_im1 = copy.copy(u_i)
+        
+        # if self.use_ps:
+        #     G_i = []
+        #     for a in range(self.M):
+        #         if a == 0:
+        #             g = np.zeros(self.f_Dua_Lps[a].numel_in(3))
+        #             G_i.append(self.f_Dua_Lps[a](np.concatenate(u_i), l_i[a], np.concatenate(u_im1), g, x0, up))
+        #         else:
+        #             G_i.append(self.f_Dua_Lbr[a](np.concatenate(u_i), l_i[a], x0, up))
 
         if self.verbose:
             J = self.f_J(np.concatenate(u_i), x0, up)
@@ -190,7 +246,29 @@ class IBR(AbstractSolver):
             if self.verbose:
                 print('===================================================')
                 print(f'IBR iteration: {ibr_it}')
+            
+            # Convergence test
+            # xtol = self.p_tol*(1+np.linalg.norm(u))
+            # ltol = self.d_tol*(1+np.linalg.norm(l))
+            # xtol = self.p_tol
+            # ltol = self.d_tol
 
+            # if self.use_ps:
+            #     c_i = self._evaluate_ps(u_i, l_i, x0, up)
+            #     p_feas = np.amax(np.maximum(c_i, np.zeros(np.sum(self.n_c))))
+            #     comp = np.amax([np.linalg.norm(np.multiply(c_i, l_i[a]), np.inf) for a in range(self.M)])
+            # else:
+            #     c_i, G_i = self._evaluate_br(u_i, l_i, x0, up)
+            #     p_feas = np.amax([np.amax(np.maximum(c_i[a], np.zeros(np.sum(self.n_cbr[a])))) for a in range(self.M)])
+            #     comp = np.amax([np.linalg.norm(np.multiply(c_i[a], l_i[a]), np.inf) for a in range(self.M)])
+            # stat = np.linalg.norm(np.concatenate(G_i), np.inf)
+            # cond = {'p_feas': p_feas, 'comp': comp, 'stat': stat}
+            # if self.verbose:
+            #     print(f'p feas: {p_feas:.4e} | comp: {comp:.4e} | stat: {stat:.4e}')
+            # if p_feas < xtol and comp < ltol and stat < ltol:
+            #     ibr_converged = True
+            #     if self.verbose: print('IBR converged via optimality conditions')
+            #     break
             cond = None
 
             for a in range(self.M):
@@ -203,12 +281,45 @@ class IBR(AbstractSolver):
                         if b != a:
                             uo = np.concatenate([u_i[c] for c in range(self.M) if c != b])
                             try:
+                                # Duo_ubr.append(self.f_Duo_ubr[b](u_i[b], l_i[b][self.Cbr_v_idxs[b]], uo, x0, up).toarray())
                                 Duo_ubr = self.f_Duo_ubr[b](u_i[b], l_i[b], uo, x0, up).toarray()
                                 Duo_ubr_v.append(Duo_ubr.ravel(order='F'))
+                                # Duo_ubr_v.append(Duo_ubr.ravel())
+                                # rng = np.random.default_rng()
+                                # for i in range(3):
+                                #     p = np.concatenate((x0, up, u_i[a]))
+                                #     solver_args = {}
+                                #     solver_args['x0'] = u_i[b]
+                                #     solver_args['lam_g0'] = l_i[b]
+                                #     solver_args['lbx'] = -np.inf*np.ones(self.N*self.num_ua_d[b])
+                                #     solver_args['ubx'] = np.inf*np.ones(self.N*self.num_ua_d[b])
+                                #     solver_args['lbg'] = -np.inf*np.ones(np.sum(self.n_cbr[b]))
+                                #     solver_args['ubg'] = np.zeros(np.sum(self.n_cbr[b]))
+                                #     solver_args['p'] = p
+                                #     sol = self.br_solvers[b](**solver_args)
+                                #     u_1 = sol['x'].toarray().squeeze()
+
+                                #     d = 2*rng.random(len(u_i[a]))-1 # Sample perturbation
+                                #     d = 1e-4*d/np.linalg.norm(d)
+                                #     p = np.concatenate((x0, up, u_i[a]+d))
+                                #     solver_args = {}
+                                #     solver_args['x0'] = u_i[b]
+                                #     solver_args['lam_g0'] = l_i[b]
+                                #     solver_args['lbx'] = -np.inf*np.ones(self.N*self.num_ua_d[b])
+                                #     solver_args['ubx'] = np.inf*np.ones(self.N*self.num_ua_d[b])
+                                #     solver_args['lbg'] = -np.inf*np.ones(np.sum(self.n_cbr[b]))
+                                #     solver_args['ubg'] = np.zeros(np.sum(self.n_cbr[b]))
+                                #     solver_args['p'] = p
+                                #     sol = self.br_solvers[b](**solver_args)
+                                #     u_2 = sol['x'].toarray().squeeze()
+
+                                #     print((u_2 - u_1)/1e-4)
+                                #     print(Duo_ubr @ d/1e-4)
 
                             except Exception as e:
                                 print(e)
-                                pdb.set_trace()
+                                # pdb.set_trace()
+
                     p = np.concatenate((x0, 
                                         up, 
                                         np.concatenate(u_i), 
@@ -252,8 +363,8 @@ class IBR(AbstractSolver):
                     if self.br_solvers[a].stats()['success'] or self.br_solvers[a].stats()['return_status'] == 'Maximum_Iterations_Exceeded':
                         u_i[a] = sol['x'].toarray().squeeze()
                         l_i[a] = sol['lam_g'].toarray().squeeze()
-                    else:
-                        pdb.set_trace()
+                    # else:
+                    #     pdb.set_trace()
 
                 if self.debug_plot:
                     u_bar = copy.deepcopy(u_i)
@@ -401,7 +512,7 @@ class IBR(AbstractSolver):
 
         for k in range(self.N):
             x_ph.append(self.joint_dynamics.fd(x_ph[k], uk_ph[k]))
-        self.f_state_rollout = ca.Function('f_state_rollout', [ca.vertcat(*ua_ph), x_ph[0]], x_ph)
+        self.f_state_rollout = ca.Function('f_state_rollout', [ca.vertcat(*ua_ph), x_ph[0]], x_ph, self.options)
         
         # Agent cost functions
         J = [ca.DM.zeros(1) for _ in range(self.M)]
@@ -409,7 +520,7 @@ class IBR(AbstractSolver):
             for k in range(self.N):
                 J[a] += self.costs_sym[a][k](x_ph[k], u_ph[a][k], u_ph[a][k-1])
             J[a] += self.costs_sym[a][-1](x_ph[-1])
-        self.f_J = ca.Function('f_J', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], J)
+        self.f_J = ca.Function('f_J', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], J, self.options)
         
         Cs = [[] for _ in range(self.N+1)] # Shared constraints
         Ca = [[[] for _ in range(self.N+1)] for _ in range(self.M)] # Agent specific constraints
@@ -483,7 +594,7 @@ class IBR(AbstractSolver):
             C[k] = ca.vertcat(*C[k])
             self.n_c[k] = C[k].shape[0]
         for a in range(self.M): self.Cbr_v_idxs[a] = np.concatenate(self.Cbr_v_idxs[a])
-        self.f_C = ca.Function(f'f_C', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], C)
+        self.f_C = ca.Function(f'f_C', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], C, self.options)
 
         # Best response specific constraint functions
         Cbr = [[[] for _ in range(self.N+1)] for _ in range(self.M)]
@@ -491,30 +602,41 @@ class IBR(AbstractSolver):
             for a in range(self.M):
                 Cbr[a][k] = C[k][self.Cbr_k_idxs[a][k]]
                 self.n_cbr[a][k] = Cbr[a][k].shape[0]
-        self.f_Cbr = [ca.Function(f'f_C{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], Cbr[a]) for a in range(self.M)]
+        self.f_Cbr = [ca.Function(f'f_C{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], Cbr[a], self.options) for a in range(self.M)]
 
         # Symbolic gradients of cost and constraint functions
         Du_J = [ca.jacobian(J[a], ua_ph[a]).T for a in range(self.M)]
         Du_C = ca.jacobian(ca.vertcat(*C), ca.vertcat(*ua_ph))
         Du_Cbr = [ca.jacobian(ca.vertcat(*Cbr[a]), ua_ph[a]) for a in range(self.M)]
-        self.f_Du_J = [ca.Function(f'f_Du_J{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_J[a]]) for a in range(self.M)]
-        self.f_Du_C = ca.Function('f_Du_C', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_C])
-        self.f_Du_Cbr = [ca.Function(f'f_Du_Cbr{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_Cbr[a]]) for a in range(self.M)]
+        self.f_Du_J = [ca.Function(f'f_Du_J{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_J[a]], self.options) for a in range(self.M)]
+        self.f_Du_C = ca.Function('f_Du_C', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_C], self.options)
+        self.f_Du_Cbr = [ca.Function(f'f_Du_Cbr{a}', [ca.vertcat(*ua_ph), x_ph[0], uk_ph[-1]], [Du_Cbr[a]], self.options) for a in range(self.M)]
 
         # Symbolic gradients of best response Lagrangians
         lbr_ph = [[ca.MX.sym(f'lbr{a}_ph_{k}', self.n_cbr[a][k]) for k in range(self.N+1)] for a in range(self.M)]
         Lbr = [J[a] + ca.dot(ca.vertcat(*lbr_ph[a]), ca.vertcat(*Cbr[a])) for a in range(self.M)]
         Dua_Lbr = [ca.jacobian(Lbr[a], ua_ph[a]).T for a in range(self.M)]
         # Duu_L = [[ca.jacobian(Du_L[a][b], ca.vertcat(*ua_ph)) for b in range(self.M)] for a in range(self.M)]
-        self.f_Dua_Lbr = [ca.Function(f'f_Du_Lbr{a}', [ca.vertcat(*ua_ph), ca.vertcat(*lbr_ph[a]), x_ph[0], uk_ph[-1]], [Dua_Lbr[a]]) for a in range(self.M)]
-        # self.f_Duu_L = [ca.Function(f'f_Duu_L{a}', [ca.vertcat(*ua_ph), ca.vertcat(*l_ph), x_ph[0], uk_ph[-1]], Duu_L[a]) for a in range(self.M)]
+        self.f_Dua_Lbr = [ca.Function(f'f_Du_Lbr{a}', [ca.vertcat(*ua_ph), ca.vertcat(*lbr_ph[a]), x_ph[0], uk_ph[-1]], [Dua_Lbr[a]], self.options) for a in range(self.M)]
+        # self.f_Duu_L = [ca.Function(f'f_Duu_L{a}', [ca.vertcat(*ua_ph), ca.vertcat(*l_ph), x_ph[0], uk_ph[-1]], Duu_L[a], self.options) for a in range(self.M)]
 
-        ipopt_opts = dict(max_iter=200,
+        if self.code_gen and self.jit:
+            self.code_gen_opts = dict(jit=True, 
+                                jit_name=self.solver_name, 
+                                compiler='shell',
+                                jit_options=dict(compiler='gcc', flags=['-%s' % self.opt_flag], verbose=self.verbose))
+        else:
+            self.code_gen_opts = dict(jit=False)
+
+        ipopt_opts = dict(max_iter=200, 
+                          linear_solver=self.linear_solver,
                           mu_strategy='adaptive',
-                          warm_start_init_point='yes')
+                          warm_start_init_point='yes',
+                          print_level=5 if self.verbose else 0)
         solver_opts = dict(error_on_fail=False, 
                             verbose_init=self.verbose, 
-                            ipopt=ipopt_opts)
+                            ipopt=ipopt_opts,
+                            **self.code_gen_opts)
 
         reg = 1e-3
         Fbr, Dula_Fbr, Duo_Fbr, Duo_ubr = [], [], [], []
@@ -525,14 +647,14 @@ class IBR(AbstractSolver):
             uo = [ua_ph[b] for b in range(self.M) if b != a]
 
             Fbr.append(ca.vertcat(Dua_Lbr[a], ca.vertcat(*lbr_ph[a])*ca.vertcat(*Cbr[a])))
-            self.f_Fbr.append(ca.Function(f'f_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Fbr[a]]))
+            self.f_Fbr.append(ca.Function(f'f_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Fbr[a]], self.options))
             Dula_Fbr.append(ca.jacobian(Fbr[a], ca.vertcat(ua_ph[a], *lbr_ph[a])))
-            self.f_Dula_Fbr.append(ca.Function(f'f_Dul{a}_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Dula_Fbr[a]]))
+            self.f_Dula_Fbr.append(ca.Function(f'f_Dul{a}_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Dula_Fbr[a]], self.options))
             Duo_Fbr.append(ca.jacobian(Fbr[a], ca.vertcat(*uo)))
-            self.f_Duo_Fbr.append(ca.Function(f'f_Duo_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Duo_Fbr[a]]))
+            self.f_Duo_Fbr.append(ca.Function(f'f_Duo_F{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Duo_Fbr[a]], self.options))
             # Duo_ua.append(-ca.solve(Duala_Fa[a]+reg*ca.DM.eye(Duala_Fa[a].shape[0]), Duo_Fa[a])[:self.N*self.num_ua_d[a],:])
             Duo_ubr.append(-ca.solve(Dula_Fbr[a], Duo_Fbr[a])[:self.N*self.num_ua_d[a],:])
-            self.f_Duo_ubr.append(ca.Function(f'f_Duo_u{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Duo_ubr[a]]))
+            self.f_Duo_ubr.append(ca.Function(f'f_Duo_u{a}', [ua_ph[a], ca.vertcat(*lbr_ph[a]), ca.vertcat(*uo), x_ph[0], uk_ph[-1]], [Duo_ubr[a]], self.options))
 
             self.br_nlps.append(dict(x=ua_ph[a], 
                                      p=ca.vertcat(x_ph[0], uk_ph[-1], *uo), 
@@ -567,13 +689,14 @@ class IBR(AbstractSolver):
             C_ps.append(self.f_C(ca.vertcat(*ua), x_ph[0], uk_ph[-1]))
         
         ipopt_opts = dict(max_iter=200, 
-                          linear_solver='ma27',
+                          linear_solver=self.linear_solver,
                           mu_strategy='adaptive',
                           warm_start_init_point='yes',
                           tol=1e-5)
         solver_opts = dict(error_on_fail=False, 
                             verbose_init=self.verbose, 
-                            ipopt=ipopt_opts)
+                            ipopt=ipopt_opts,
+                            **self.code_gen_opts)
 
         self.ps_br_nlps, self.ps_br_solvers = [], []
         for a in range(self.M):
@@ -587,31 +710,91 @@ class IBR(AbstractSolver):
         lps_ph = [[ca.MX.sym(f'lps{a}_ph_{k}', self.n_c[k]) for k in range(self.N+1)] for a in range(self.M)]
         Lps = [J_ps[a] + ca.dot(ca.vertcat(*lps_ph[a]), ca.vertcat(*C_ps[a])) for a in range(self.M)]
         Dua_Lps = [ca.jacobian(Lps[a], ua_ph[a]).T for a in range(self.M)]
-        self.f_Dua_Lps = [ca.Function(f'f_Du_Lps{a}', [ca.vertcat(*ua_ph), ca.vertcat(*lps_ph[a]), ca.vertcat(*uan_ph), ca.vertcat(*Duo_ubr_ph), alpha, x_ph[0], uk_ph[-1]], [Dua_Lps[a]]) for a in range(self.M)]
+        self.f_Dua_Lps = [ca.Function(f'f_Du_Lps{a}', [ca.vertcat(*ua_ph), ca.vertcat(*lps_ph[a]), ca.vertcat(*uan_ph), ca.vertcat(*Duo_ubr_ph), alpha, x_ph[0], uk_ph[-1]], [Dua_Lps[a]], self.options) for a in range(self.M)]
+
+        if self.code_gen and not self.jit:
+            generator = ca.CodeGenerator(self.c_file_name)
+            # generator.add(self.f_state_rollout)
+            # generator.add(self.f_J)
+            # generator.add(self.f_C)
+            # generator.add(self.f_Du_C)
+            # for a in range(self.M):
+            #     generator.add(self.f_Du_J[a])
+            #     generator.add(self.f_Du_L[a])
+            #     generator.add(self.f_Duu_L[a])
+
+            # Set up paths
+            cur_dir = pathlib.Path.cwd()
+            gen_path = cur_dir.joinpath(self.solver_name)
+            c_path = gen_path.joinpath(self.c_file_name)
+            if gen_path.exists():
+                shutil.rmtree(gen_path)
+            gen_path.mkdir(parents=True)
+
+            os.chdir(gen_path)
+            if self.verbose:
+                print('- Generating C code for solver %s at %s' % (self.solver_name, str(gen_path)))
+            generator.generate()
+            pdb.set_trace()
+            # Compile into shared object
+            so_path = gen_path.joinpath(self.so_file_name)
+            if self.verbose:
+                print('- Compiling shared object %s from %s' % (so_path, c_path))
+                print('- Executing "gcc -fPIC -shared -%s %s -o %s"' % (self.opt_flag, c_path, so_path))
+            os.system('gcc -fPIC -shared -%s %s -o %s' % (self.opt_flag, c_path, so_path))
+
+            # Swtich back to working directory
+            os.chdir(cur_dir)
+            install_dir = self.install()
+
+            # Load solver
+            self._load_solver(install_dir.joinpath(self.so_file_name))
+
+    def _load_solver(self, solver_path=None):
+        if solver_path is None:
+            solver_path = str(pathlib.Path(self.solver_dir, self.so_file_name).expanduser())
+        if self.verbose:
+            print('- Loading solver from %s' % solver_path)
+        # self.f_state_rollout = ca.external('f_state_rollout', solver_path)
+        # self.f_J = ca.external('f_J', solver_path)
+        # self.f_C = ca.external('f_C', solver_path)
+        # self.f_Du_C = ca.external('f_Du_C', solver_path)
+        # self.f_Du_J = [None for _ in range(self.M)]
+        # self.f_Du_L = [None for _ in range(self.M)]
+        # self.f_Duu_L = [None for _ in range(self.M)]
+        # for a in range(self.M):
+        #     self.f_Du_J[a] = ca.external(f'f_Du_J{a}', solver_path)
+        #     self.f_Du_L[a] = ca.external(f'f_Du_L{a}', solver_path)
+        #     self.f_Duu_L[a] = ca.external(f'f_Duu_L{a}', solver_path)
 
     def get_prediction(self) -> List[VehiclePrediction]:
         return self.state_input_predictions
 
-    def _update_debug_plot(self, u, x0, up):
-        q_nom = np.array(self.f_state_rollout(np.concatenate(u), x0)).squeeze()
-        u_nom = []
+    def _update_debug_plot(self, u, x0, up, P=np.array([])):
+        q_bar = np.array(self.f_state_rollout(np.concatenate(u), x0)).squeeze()
+        ua_bar = []
         for a in range(self.M):
-            u_nom.append(u[a].reshape((self.N, self.num_ua_d[a])))
-        if not self.local_pos:
-            for i in range(self.M):
-                self.l_xy[i].set_data(q_nom[:,0+int(np.sum(self.num_qa_d[:i]))], q_nom[:,1+int(np.sum(self.num_qa_d[:i]))])
-        else:
-            raise NotImplementedError('Conversion from local to global pos has not been implemented for debug plot')
-        self.ax_xy.set_aspect('equal')
-        J = self.f_J(np.concatenate(u), x0, up)
-        self.ax_xy.set_title(str(J))
+            ua_bar.append(u[a].reshape((self.N, self.num_ua_d[a])))
+        u_bar = np.hstack(ua_bar)
+        
         for i in range(self.M):
-            self.l_a[i].set_data(np.arange(self.N), u_nom[i][:,0])
-            self.l_s[i].set_data(np.arange(self.N), u_nom[i][:,1])
-        self.ax_a.relim()
-        self.ax_a.autoscale_view()
-        self.ax_s.relim()
-        self.ax_s.autoscale_view()
+            self.l_xy[i].set_data(q_bar[:,0+int(np.sum(self.num_qa_d[:i]))], q_bar[:,1+int(np.sum(self.num_qa_d[:i]))])
+        self.ax_xy.set_aspect('equal')
+        self.ax_xy.relim()
+        self.ax_xy.autoscale_view()
+        J = self.f_J(np.concatenate(u), x0, up)
+        self.ax_xy.set_title(f'{self.solver_name} | {str(J)}')
+        for i in range(self.M):
+            for j in range(self.num_qa_d[i]):
+                _q =  q_bar[:,j+int(np.sum(self.num_qa_d[:i]))]
+                self.l_q[i][j].set_data(np.arange(self.N+1), _q)
+                self.ax_q[i][j].relim()
+                self.ax_q[i][j].autoscale_view()
+            for j in range(self.num_ua_d[i]):
+                _u = u_bar[:,j+int(np.sum(self.num_ua_d[:i]))]
+                self.l_u[i][j].set_data(np.arange(self.N), _u)
+                self.ax_u[i][j].relim()
+                self.ax_u[i][j].autoscale_view()
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
 

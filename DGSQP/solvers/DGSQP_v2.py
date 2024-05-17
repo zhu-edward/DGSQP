@@ -1,5 +1,7 @@
 #!/usr/bin python3
 
+ZERO_TOL = 1e-8
+
 import numpy as np
 import scipy as sp
 import casadi as ca
@@ -12,6 +14,8 @@ import pdb
 import time
 import itertools
 
+from collections import deque
+
 import matplotlib.pyplot as plt
 
 from typing import List, Dict
@@ -20,7 +24,32 @@ from DGSQP.dynamics.dynamics_models import CasadiDecoupledMultiAgentDynamicsMode
 from DGSQP.types import VehicleState, VehiclePrediction
 
 from DGSQP.solvers.abstract_solver import AbstractSolver
-from DGSQP.solvers.solver_types import DGSQPParams
+from DGSQP.solvers.solver_types import DGSQPV2Params
+
+from dataclasses import dataclass, field
+
+@dataclass
+class IterationData():
+    iteration: int                  = field(default=0)
+    qp: dict                        = field(default_factory=lambda : {})
+    primal_iterate: np.ndarray      = field(default=None)
+    primal_step: np.ndarray         = field(default=None)
+    dual_iterate: np.ndarray        = field(default=None)
+    dual_step: np.ndarray           = field(default=None)
+    slack_iterate: np.ndarray       = field(default=None)
+    slack_step: np.ndarray          = field(default=None)
+    merit_parameter: float          = field(default=0)
+    primal_feasibility: float       = field(default=0)
+    complementarity: float          = field(default=0)
+    stationarity: float             = field(default=0)
+    gradient_evaluations: int       = field(default=0)
+    hessian_evaluations: int        = field(default=0)
+    qp_solutions: int               = field(default=0)
+    iteration_time: float           = field(default=0)
+    step_type: str                  = field(default=None)
+    step_size: float                = field(default=1.0)
+    watchdog: bool                  = field(default=False)
+    elastic_mode: bool              = field(default=False)
 
 class DGSQP(AbstractSolver):
     def __init__(self, joint_dynamics: CasadiDecoupledMultiAgentDynamicsModel, 
@@ -28,10 +57,10 @@ class DGSQP(AbstractSolver):
                        agent_constraints: List[ca.Function], 
                        shared_constraints: List[ca.Function],
                        bounds: Dict[str, VehicleState],
-                       params=DGSQPParams(),
+                       params=DGSQPV2Params(),
+                       use_mx=False,
                        print_method=print,
-                       xy_plot=None,
-                       use_mx=False):
+                       xy_plot=None):
         self.joint_dynamics = joint_dynamics
         self.M = self.joint_dynamics.n_a
         if print_method is None:
@@ -43,17 +72,18 @@ class DGSQP(AbstractSolver):
 
         self.N                  = params.N
 
-        self.reg                = params.reg
+        self.reg_init           = params.reg
+        self.reg_decay          = params.reg_decay
         self.line_search_iters  = params.line_search_iters
-        self.nonmono_ls         = params.nonmono_ls
         self.sqp_iters          = params.sqp_iters
-        self.conv_approx        = params.conv_approx
         self.merit_function     = params.merit_function
+        self.merit_parameter    = params.merit_parameter
+        self.merit_decrease_condition = params.merit_decrease_condition
 
         # Convergence tolerance for SQP
         self.p_tol              = params.p_tol
         self.d_tol              = params.d_tol
-        self.rel_tol_req        = 3
+        self.rel_tol_req        = 10
 
         # Line search parameters
         self.beta               = params.beta
@@ -61,6 +91,7 @@ class DGSQP(AbstractSolver):
 
         self.verbose            = params.verbose
         self.save_iter_data     = params.save_iter_data
+        self.save_qp_data       = params.save_qp_data
         if params.time_limit is None:
             self.time_limit = np.inf
         else:
@@ -80,48 +111,7 @@ class DGSQP(AbstractSolver):
         self.pause_on_plot      = params.pause_on_plot
         self.local_pos          = params.local_pos
 
-        # self.hessian_approximation = 'none'
-        # self.hessian_approximation = 'bfgs'
-        self.hessian_approximation = params.hessian_approximation
-
-        if not params.enable_jacobians:
-            jac_opts = dict(enable_fd=False, enable_jacobian=False, enable_forward=False, enable_reverse=False)
-        else:
-            jac_opts = dict()
-
-        if self.code_gen:
-            if self.jit:
-                self.options = dict(jit=True, jit_name=self.solver_name, compiler='shell', jit_options=dict(compiler='gcc', flags=['-%s' % self.opt_flag], verbose=self.verbose), **jac_opts)
-            else:
-                self.options = dict(jit=False, **jac_opts)
-                self.c_file_name = self.solver_name + '.c'
-                self.so_file_name = self.solver_name + '.so'
-                if params.solver_dir is not None:
-                    self.solver_dir = pathlib.Path(params.solver_dir).expanduser().joinpath(self.solver_name)
-        else:
-            self.options = dict(jit=False, **jac_opts)
-            if params.solver_dir is not None:
-                self.solver_dir = pathlib.Path(params.solver_dir).expanduser()
-                self.so_file_name = params.so_name
-
-        if self.debug_plot:
-            plt.ion()
-            self.fig = plt.figure(figsize=(10,5))
-            self.ax_xy = self.fig.add_subplot(1,2,1)
-            self.ax_a = self.fig.add_subplot(2,2,2)
-            self.ax_s = self.fig.add_subplot(2,2,4)
-            if xy_plot is not None:
-                xy_plot(self.ax_xy)
-            self.colors = ['b', 'g', 'r', 'm', 'c']
-            self.l_xy, self.l_a, self.l_s = [], [], []
-            for i in range(self.M):
-                self.l_xy.append(self.ax_xy.plot([], [], f'{self.colors[i]}o')[0])
-                self.l_a.append(self.ax_a.plot([], [], f'-{self.colors[i]}o')[0])
-                self.l_s.append(self.ax_s.plot([], [], f'-{self.colors[i]}o')[0])
-            self.ax_a.set_ylabel('accel')
-            self.ax_s.set_ylabel('steering')
-            self.fig.canvas.draw()
-            self.fig.canvas.flush_events()
+        self.options = {}
 
         # The costs should be a dict of casadi functions with keys 'stage' and 'terminal'
         if len(costs) != self.M:
@@ -129,6 +119,8 @@ class DGSQP(AbstractSolver):
         self.costs_sym = costs
 
         # The constraints should be a list (of length N+1) of casadi functions such that constraints[i] <= 0
+        # if len(constraints) != self.N+1:
+        #     raise ValueError('Horizon length: %i, but %i constraint functions were provided' % (self.N+1, len(constraints)))
         self.constraints_sym = agent_constraints
         self.shared_constraints_sym = shared_constraints
 
@@ -180,91 +172,118 @@ class DGSQP(AbstractSolver):
         self.l_ws = None
 
         # Construct QP solver
-        if self.conv_approx:
-            if self.qp_interface == 'casadi':
-                if self.qp_solver == 'osqp':
-                    solver_opts = dict(error_on_fail=False, osqp=dict(polish=True, verbose=self.verbose))
-                elif self.qp_solver == 'qrqp':
-                    solver_opts = dict(error_on_fail=False)
-                elif self.qp_solver == 'superscs':
-                    solver_opts = dict(error_on_fail=False)
-                elif self.qp_solver == 'qpoases':
-                    solver_opts = dict(error_on_fail=False, sparse=False, printLevel='tabular' if self.verbose else 'none')
-                elif self.qp_solver == 'cplex':
-                    solver_opts = dict(error_on_fail=False, cplex=dict(CPXPARAM_OptimalityTarget=1, CPXPARAM_ScreenOutput=self.verbose))
+        if self.qp_interface == 'casadi':
+            if self.qp_solver == 'osqp':
+                solver_opts = dict(error_on_fail=False, osqp=dict(polish=True, verbose=self.verbose))
+            elif self.qp_solver == 'qrqp':
+                solver_opts = dict(error_on_fail=False)
+            elif self.qp_solver == 'superscs':
+                solver_opts = dict(error_on_fail=False)
+            elif self.qp_solver == 'qpoases':
+                solver_opts = dict(error_on_fail=False, sparse=False, printLevel='tabular' if self.verbose else 'none')
+            elif self.qp_solver == 'cplex':
+                # Change this to match version of libcplex<CPLEX_VERSION>.so 
+                os.environ['CPLEX_VERSION'] = '2210'
+                solver_opts = dict(error_on_fail=False, cplex=dict(CPXPARAM_OptimalityTarget=2, CPXPARAM_ScreenOutput=self.verbose))
 
-                if self.hessian_approximation == 'none':
-                    prob = {'h': self.f_Q.sparsity_out(0), 'a': self.f_Du_C.sparsity_out(0)}
-                else:
-                    prob = {'h': ca.DM.zeros(self.f_Q.size_out(0)).sparsity(), 'a': self.f_Du_C.sparsity_out(0)}
-                self.solver = ca.conic('qp', self.qp_solver, prob, solver_opts)
-                self.dual_name = 'lam_a'
-            else:
-                raise(ValueError(f'Unsupported QP interface {self.qp_interface}'))
+            G_sparsity = self.f_Du_C.sparsity_out(0)
+            Gem_sparsity = self.f_Du_Cem.sparsity_out(0)
+            Q_sparsity = self.f_Q.sparsity_out(0)
+            Qem_sparsity = self.f_Qem.sparsity_out(0)
+            
+            # Nominal QP solver
+            self.solver = ca.conic('qp', self.qp_solver, {'h': Q_sparsity, 'a': G_sparsity}, solver_opts)
+            # Elastic mode QP solver
+            self.em_solver = ca.conic('em_qp', self.qp_solver, {'h': Qem_sparsity, 'a': Gem_sparsity}, solver_opts)
+
+            self.dual_name = 'lam_a'
         else:
-            du_ph = ca.SX.sym('du', self.N*self.n_u)
-            Q_ph = ca.SX.sym('Q', self.N*self.n_u, self.N*self.n_u)
-            q_ph = ca.SX.sym('q', self.N*self.n_u)
-            G_ph = ca.SX.sym('G', np.sum(self.n_c), self.N*self.n_u)
-
-            f = ca.bilin(Q_ph, du_ph, du_ph)/2 + ca.dot(q_ph, du_ph)
-            g = G_ph @ du_ph
-            p = ca.vertcat(*ca.horzsplit(Q_ph), q_ph, *ca.horzsplit(G_ph))
-            prob = dict(x=du_ph, f=f, g=g, p=p)
-
-            # Build NLP solver for Newton step
-            ipopt_opts = dict(max_iter=500,
-                            linear_solver='ma27',
-                            warm_start_init_point='yes',
-                            mu_strategy='adaptive',
-                            mu_init=1e-5,
-                            mu_min=1e-15,
-                            barrier_tol_factor=1,
-                            print_level=0)
-            solver_opts = dict(error_on_fail=False, 
-                                verbose_init=self.verbose, 
-                                ipopt=ipopt_opts)
-            self.solver = ca.nlpsol('nlp', 'ipopt', prob, solver_opts)
-            self.dual_name = 'lam_g'
+            raise(ValueError(f'Unsupported QP interface {self.qp_interface}'))
 
         self.initialized = True
 
-    def _solve_qp(self, Q, q, G, g, x0=None):
+        self.gamma = params.delta_decay
+        self.sigma = params.merit_decrease
+
+        self.nms = params.nms
+        self.nms_mstep_frequency = params.nms_frequency
+        self.nms_memory_size = params.nms_memory_size
+
+        self.nms_initial_step_size_factor = 20
+        self.nms_initial_reference_factor = 1
+        
+        self.soc = False
+        self.soc_steps = 4
+        self.soc_index = 0
+
+        self.eta = 1e3
+        self.rho = 1e3
+
+        self.qp_fails = 0
+
+        if self.debug_plot:
+            plt.ion()
+            self.fig = plt.figure(figsize=(20,10))
+            
+            self.ax_xy = self.fig.add_subplot(1, 1+self.M, 1)
+            self.ax_q = [[self.fig.add_subplot(self.num_qa_d[i]+self.num_ua_d[i], 1+self.M, i+2 + j*(1+self.M)) for j in range(self.num_qa_d[i])] for i in range(self.M)]
+            self.ax_u = [[self.fig.add_subplot(self.num_qa_d[i]+self.num_ua_d[i], 1+self.M, i+2 + (j+self.num_qa_d[i])*(1+self.M)) for j in range(self.num_ua_d[i])] for i in range(self.M)]
+            
+            self.l_xy = []
+            self.l_q = [[] for _ in range(self.M)]
+            self.l_u = [[] for _ in range(self.M)]
+
+            if xy_plot is not None:
+                xy_plot(self.ax_xy)
+
+            for i in range(self.M):
+                self.l_xy.append(self.ax_xy.plot([], [], 'o')[0])
+                self.ax_q[i][0].set_title(f'Agent {i+1}')
+                for j in range(self.num_qa_d[i]):
+                    self.l_q[i].append(self.ax_q[i][j].plot([], [], 'o')[0])
+                    self.ax_q[i][j].set_ylabel(f'State {j+1}')
+                    self.ax_q[i][j].get_xaxis().set_ticks([])
+                for j in range(self.num_ua_d[i]):
+                    self.l_u[i].append(self.ax_u[i][j].plot([], [], 's')[0])
+                    self.ax_u[i][j].set_ylabel(f'Input {j+1}')
+                    self.ax_u[i][j].get_xaxis().set_ticks([])
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
+
+    def _solve_qp(self, Q, q, G, g, l, x0=None):
         t = time.time()
-        if self.conv_approx:
-            Q = self._nearestPD(Q)
-        else:
-            Q = (Q + Q.T)/2
+        Q = self._nearest_pd(Q)
+
         if self.reg > 0:
             Q += self.reg*np.eye(Q.shape[0])
         if x0 is None:
             x0 = np.zeros(self.N*self.n_u)
 
-        try:
-            if self.conv_approx:
-                if self.qp_interface == 'casadi':
-                    sol = self.solver(h=Q, g=q, a=G, uba=-g, x0=x0)
-                    du = sol['x'].toarray().squeeze()
-                    l_hat = sol['lam_a'].toarray().squeeze()
-                    status = self.solver.stats()['return_status']
-                else:
-                    raise(ValueError(f'Unsupported QP interface {self.qp_interface}'))
-            else:
-                sol = self.solver(ubg=-g, x0=x0,
-                                    p=np.concatenate((np.ravel(Q, 'F'), q, np.ravel(G, 'F'))))
-                du = sol['x'].toarray().squeeze()
-                l_hat = sol['lam_g'].toarray().squeeze()
-                status = self.solver.stats()['return_status']
-            
-            if self.verbose:
-                self.print_method(f'Status: {status}')
-                self.print_method(f'Inner solve time: {time.time()-t}')
-        except:
-            du = [None]
-            l_hat = [None]
-        
-        return du, l_hat
+        if self.verbose:
+            self.print_method(f'Cost matrix condition number: {np.linalg.cond(Q)}')
+            self.print_method(f'Constraint matrix condition number: {np.linalg.cond(G)}')
 
+        try:
+            if self.qp_interface == 'casadi':
+                sol = self.solver(h=Q, g=q, a=G, uba=-g, x0=x0)
+                status = self.solver.stats()['return_status']
+                if self.verbose: self.print_method(f'QP status: {status}')
+                if self.solver.stats()['success']:
+                    du = sol['x'].toarray().squeeze()
+                    dl = sol['lam_a'].toarray().squeeze() - l
+                else:
+                    du = [None]
+                    dl = [None]
+            else:
+                raise(ValueError(f'Unsupported QP interface {self.qp_interface}'))
+            if self.verbose: self.print_method(f'QP solve time: {(time.time()-t):.3f}')
+        except Exception as e:
+            self.print_method(f'QP solver failed with exception: {e}')
+            du = [None]
+            dl = [None]
+        
+        return du, dl
+    
     def initialize(self):
         pass
 
@@ -280,7 +299,8 @@ class DGSQP(AbstractSolver):
         self.u_ws = np.concatenate(u)
         self.l_ws = l_ws
 
-    def step(self, states: List[VehicleState],  parameters: np.ndarray = np.array([])):
+    def step(self, states: List[VehicleState],  
+                parameters: np.ndarray = np.array([])):
         info = self.solve(states, parameters)
 
         self.joint_dynamics.qu2state(states, None, self.u_pred[0])
@@ -299,10 +319,10 @@ class DGSQP(AbstractSolver):
     def get_prediction(self) -> List[VehiclePrediction]:
         return self.state_input_predictions
 
-    def solve(self, states: List[VehicleState], parameters: np.ndarray = np.array([])):
+    def solve(self, states: List[VehicleState], 
+                parameters: np.ndarray = np.array([])):
         solve_info = {}
         solve_start = time.time()
-        self.u_prev = np.zeros(self.n_u)
 
         u = copy.copy(self.u_ws)
         up = copy.copy(self.u_prev)
@@ -310,21 +330,23 @@ class DGSQP(AbstractSolver):
         x0 = self.joint_dynamics.state2q(states)
 
         # Warm start dual variables
-        # if self.l_ws is None:
-        #     # Least squares approx
-        #     q, G, _, _ = self._evaluate(u, None, x0, up, hessian=False)
-        #     G = sp.sparse.csc_matrix(G)
-        #     l = np.maximum(0, -sp.sparse.linalg.lsqr(G @ G.T, G @ q)[0])
-        # else:
-        #     l = copy.copy(self.l_ws)
-        q, G, _, _ = self._evaluate(u, None, x0, up, P=parameters, hessian=False)
-        # G = G.full()
-        # l = np.maximum(0, -np.linalg.lstsq(G @ G.T, G @ q, rcond=None)[0])
+        q, G, g, _ = self._evaluate(u, None, x0, up, P=parameters, hessian=False)
         G = G.sparse()
         l = np.maximum(0, -sp.sparse.linalg.lsqr(G @ G.T, G @ q)[0])
         if l is None:
             l = np.zeros(np.sum(self.n_c))
         init = dict(u=u, l=l)
+        u_im1 = copy.copy(u)
+        l_im1 = copy.copy(l)
+        
+        phi = float(self.f_phi(u, l, np.maximum(0, g), q, G, g, 1.0, x0, up, parameters))
+        self.nms_memory = deque([self.nms_initial_reference_factor*phi], self.nms_memory_size)
+        self.reg = copy.copy(self.reg_init)
+
+        self.checkpoint_counter = 0
+        self.checkpoint_index = 0
+        self.checkpoint_delta = 0
+        self.checkpoint_reg = self.reg
 
         if self.debug_plot:
             self._update_debug_plot(copy.copy(u), copy.copy(x0), copy.copy(up), copy.copy(parameters))
@@ -332,146 +354,259 @@ class DGSQP(AbstractSolver):
                 pdb.set_trace()
 
         sqp_converged = False
+        finished = False
         rel_tol_its = 0
         sqp_it = 0
+        m_step_it = 0
         iter_data = []
-        self.print_method(self.solver_name)
         while True:
             if self.verbose:
                 self.print_method('===================================================')
                 self.print_method(f'DGSQP iteration: {sqp_it}')
-
-            if self.debug_plot:
-                self._update_debug_plot(copy.copy(u), copy.copy(x0), copy.copy(up), copy.copy(parameters))
-                if self.pause_on_plot:
-                    pdb.set_trace()
-            
             sqp_it_start = time.time()
+
+            _data = IterationData(iteration=sqp_it,
+                                  primal_iterate=copy.copy(u),
+                                  dual_iterate=copy.copy(l))
+
             qp_solves = 0
 
             # Evaluate SQP approximation
-            if sqp_it == 0 or self.hessian_approximation == 'none':
-                # Exact Hessian
-                Q_i, q_i, G_i, g_i, _ = self._evaluate(u, l, x0, up, P=parameters)
-                # if self.hessian_approximation:
-                #     B = list(map(lambda x: self._nearestPD(x.full()), self.f_Duu_L(u, l, x0, up)))
-            else:
-                q_i, G_i, g_i, _ = self._evaluate(u, l, x0, up, P=parameters, hessian=False)
-                def jac_eval(u, l):
-                    q, G, _, _ = self._evaluate(u, l, x0, up, P=parameters, hessian=False)
-                    return [q + G.T @ l]
-                # Approximate Hessian
-                Q_i = self._hessian_approximation(u, l, u_im1, l_im1, [self._nearestPD(Q_i)], jac_eval, method=self.hessian_approximation)[0]
-                # B = self._bfgs(u, l, u_im1, l_im1, B, lambda u, l: self.f_Du_L(u, l, x0, up))
-                # Q_i = np.vstack([_B[int(np.sum(self.num_ua_el[:a])):int(np.sum(self.num_ua_el[:a+1])),:] for a, _B in enumerate(B)])
+            Q_i, q_i, G_i, g_i, _ = self._evaluate(u, l, x0, up, P=parameters)
 
             d_i = q_i + G_i.T @ l
 
-            u_im1 = copy.copy(u)
-            l_im1 = copy.copy(l)
-
-            # Convergence test
             xtol = self.p_tol
             ltol = self.d_tol
-            p_feas = max(0, np.amax(g_i))
-            comp = np.linalg.norm(g_i * l, ord=np.inf)
-            stat = np.linalg.norm(d_i, ord=np.inf)
-            cond = {'p_feas': p_feas, 'comp': comp, 'stat': stat}
+            _data.primal_feasibility = max(0, np.amax(g_i))
+            _data.complementarity = np.linalg.norm(g_i * l, ord=np.inf)
+            _data.stationarity = np.linalg.norm(d_i, ord=np.inf)
             if self.verbose:
-                self.print_method(f'SQP iteration {sqp_it}')
-                self.print_method(f'p feas: {p_feas:.4e} | comp: {comp:.4e} | stat: {stat:.4e}')
-            if stat > 1e5:
-                sqp_it_dur = time.time() - sqp_it_start
-                if self.save_iter_data:
-                    iter_data.append(dict(cond=cond, u_sol=u, l_sol=l, qp_solves=qp_solves, it_time=sqp_it_dur))
-                if self.verbose: self.print_method('SQP diverged')
-                msg = 'diverged'
+                self.print_method(f'p feas: {_data.primal_feasibility:.4e} | comp: {_data.complementarity:.4e} | stat: {_data.stationarity:.4e}')
+            if self.debug_plot:
+                if len(iter_data) > 0:
+                    if iter_data[-1].step_type == 'm-step':
+                        self._update_debug_plot(copy.copy(u), copy.copy(x0), copy.copy(up), copy.copy(parameters))
+                        if self.pause_on_plot:
+                            pdb.set_trace()
+
+            # Divergence
+            if _data.stationarity > 1e10:
                 sqp_converged = False
-                break
-            if p_feas < xtol and comp < ltol and stat < ltol:
-                sqp_it_dur = time.time() - sqp_it_start
-                if self.save_iter_data:
-                    iter_data.append(dict(cond=cond, u_sol=u, l_sol=l, qp_solves=qp_solves, it_time=sqp_it_dur))
+                finished = True
+                msg = 'diverged'
+                if self.verbose: self.print_method('SQP diverged')
+            # Converged via optimaility conditions
+            if _data.primal_feasibility < xtol and _data.complementarity < ltol and _data.stationarity < ltol:
                 sqp_converged = True
+                finished = True
                 msg = 'conv_abs_tol'
                 if self.verbose: self.print_method('SQP converged via optimality conditions')
-                break
-            
-            # Compute SQP primal dual step
-            du, l_hat = self._solve_qp(Q_i, q_i, G_i, g_i)
-            qp_solves += 1
-            if None in du:
-                sqp_it_dur = time.time() - sqp_it_start
-                if self.save_iter_data:
-                    iter_data.append(dict(cond=cond, u_sol=u, l_sol=l, qp_solves=qp_solves, it_time=sqp_it_dur))
+            # Max iterations reached
+            # if sqp_it >= self.sqp_iters:
+            if m_step_it >= self.sqp_iters:
                 sqp_converged = False
-                msg = 'qp_fail'
-                if self.verbose: self.print_method('QP solution failed')
+                finished = True
+                msg = 'max_it'
+                if self.verbose: self.print_method('Max SQP iterations reached')
+            if time.time() - solve_start > self.time_limit:
+                sqp_converged = False
+                finished = True
+                msg = 'time_limit_exceeded'
+                if self.verbose: self.print_method('Time limit exceeded')
+
+            if finished:
+                _data.qp_solutions = qp_solves
+                _data.iteration_time = time.time() - sqp_it_start
+                iter_data.append(_data)
                 break
-            dl = l_hat - l
 
-            ls = True
-            s = np.minimum(0, g_i)
-            ds = g_i + G_i @ du - s
-            mu = self._get_mu(u, du, l, dl, s, ds, Q_i, q_i, G_i, g_i)
+            # Compute SQP primal dual step
+            if self.save_qp_data:
+                _data.qp = dict(Q=Q_i, q=q_i, G=G_i, g=g_i)
+                _data.qp['L'] = ca.vertcat(*self.f_Duu_L(u, l, x0, up, parameters))
+                _data.qp['B'] = self._nearest_pd(_data.qp['L'])
+            du, dl = self._solve_qp(Q_i, q_i, G_i, g_i, l)
+            qp_solves += 1
 
-            # Do line search
-            if ls:
-                if self.nonmono_ls:
-                    # u, l, n_qp = self._watchdog_line_search_3(u, du, l, dl, s, ds, Q_i, q_i, G_i, g_i, 
-                    #                 lambda u, l, hessian: self._evaluate(u, l, x0, up, hessian),
-                    #                 lambda u, l, s, q, G, g: float(self.f_phi(l, s, q, G, g, mu)),
-                    #                 lambda u, du, l, dl, s, ds, Q, q, G, g: float(self.f_dphi(du, l, dl, s, Q, q, G, g, mu)))
-                    u, l, n_qp = self._watchdog_line_search_4(u, du, l, dl, s, ds, Q_i, q_i, G_i, g_i, 
-                                    lambda u, l, hessian: self._evaluate(u, l, x0, up, P=parameters, hessian=hessian),
-                                    lambda u, l, s, q, G, g: float(self.f_phi(l, s, q, G, g, mu)),
-                                    lambda u, du, l, dl, s, ds, Q, q, G, g: float(self.f_dphi(du, l, dl, s, Q, q, G, g, mu)))
-                    # u, l, n_qp = self._watchdog_line_search_4(u, du, l, dl, Q_i, q_i, G_i, g_i, 
-                    #                 lambda u, l, hessian: self._evaluate(u, l, x0, up, hessian),
-                    #                 lambda u, l, s, q, G, g, mu: float(self.f_phi(l, s, q, G, g, mu)),
-                    #                 lambda u, du, l, dl, s, ds, Q, q, G, g, mu: float(self.f_dphi(du, l, dl, s, Q, q, G, g, mu)))
-                    qp_solves += n_qp
+            if None in du:
+                if self.nms:
+                    self.qp_fails += 1
+                    # if self.qp_fails >= 10:
+                    #     iter_data.append(_data)
+                    #     sqp_converged = False
+                    #     finished = True
+                    #     msg = 'qp_fail'
+                    #     break
+
+                    # If QP fails, do m-step from last checkpoint
+                    if self.verbose: self.print_method('QP solution failed')
+
+                    if len(iter_data) == 0:
+                        iter_data.append(_data)
+                        sqp_converged = False
+                        finished = True
+                        msg = 'qp_fail'
+                        break
+
+                    d_step = False
+                    m_step = True
+
+                    _idx = min(self.checkpoint_index, len(iter_data)-1)
+                    if self.verbose: self.print_method(f'Performing m-step from iteration {_idx}')
+
+                    u, du, l, dl, s, ds, mu, _data = self.load_checkpoint(iter_data, _idx, _data)
                 else:
-                    u, l, _ = self._line_search_3(u, du, l, dl, s, ds, Q_i, q_i, G_i, g_i, 
-                                    lambda u, l, hessian: self._evaluate(u, l, x0, up, P=parameters, hessian=hessian),
-                                    lambda u, l, s, q, G, g: float(self.f_phi(l, s, q, G, g, mu)),
-                                    lambda u, du, l, dl, s, ds, Q, q, G, g: float(self.f_dphi(du, l, dl, s, Q, q, G, g, mu)))
-            else:
-                u += 0.01*du
-                l += 0.01*dl
-
-            sqp_it_dur = time.time() - sqp_it_start
-            if self.verbose:
-                J = self.f_J(u, x0, up, parameters)
-                self.print_method(str(J))
-                self.print_method(f'SQP iteration {sqp_it} time: {sqp_it_dur}')
-                self.print_method('===================================================')
-            
-            if self.save_iter_data:
-                iter_data.append(dict(cond=cond, u_sol=u, l_sol=l, qp_solves=qp_solves, it_time=sqp_it_dur))
-
-            # Convergence via relative tolerance
-            if np.linalg.norm(u-u_im1) < xtol/2 and np.linalg.norm(l-l_im1) < ltol/2:
-                rel_tol_its += 1
-                if rel_tol_its >= self.rel_tol_req and p_feas < xtol:
-                    sqp_converged = True
-                    msg = 'conv_rel_tol'
-                    if self.verbose: self.print_method('SQP converged via relative tolerance')
+                    iter_data.append(_data)
+                    sqp_converged = False
+                    finished = True
+                    msg = 'qp_fail'
                     break
             else:
-                rel_tol_its = 0
+                self.qp_fails = 0
+                _data.primal_step = copy.copy(du)
+                _data.dual_step = copy.copy(dl)
+                if sqp_it == 0:
+                    # Initialize step size limit
+                    self.delta = self.nms_initial_step_size_factor*np.linalg.norm(np.concatenate((du, dl)))
+                    self.checkpoint_delta = copy.copy(self.delta)
 
+                if self.nms:
+                    # Determine which type of step to take
+                    d_step = False
+                    m_step = False
+                    if self.checkpoint_counter >= self.nms_mstep_frequency:
+                        if self.verbose: self.print_method('- Checkpoint reached, checking for merit decrease')
+                        m_step = True
+                    else:
+                        step_norm = np.linalg.norm(np.concatenate((du, dl)))
+                        if self.verbose: self.print_method(f'- step norm: {step_norm:.3E} | delta: {self.delta:.3E}')
+                        if step_norm < self.delta:
+                            d_step = True
+                        else:
+                            m_step = True
+                else:
+                    d_step = False
+                    m_step = False
+
+                s = np.maximum(0, g_i)
+                ds = np.maximum(0, g_i + np.array(G_i @ du).squeeze()) - s
+                _data.slack_iterate = copy.copy(s)
+                _data.slack_step = copy.copy(ds)
+
+                if self.merit_parameter is None:
+                    mu = self._get_mu(u, du, l, dl, s, ds, Q_i, q_i, G_i, g_i, x0, up, parameters)
+                else:
+                    mu = self.merit_parameter
+                _data.merit_parameter = mu
+            
+            if d_step:
+                # Relaxed step
+                if self.verbose: self.print_method('d-step')
+                _data.step_type = 'd-step'
+                u += du
+                l += dl
+                self.delta = self.gamma*self.delta
+                self.checkpoint_counter += 1
+
+            if m_step:
+                if self.verbose: self.print_method('m-step')
+                _data.step_type = 'm-step'
+                m_step_it += 1
+
+                # Check descent condition for full step
+                _u = u + du
+                _l = l + dl
+                _q, _G, _g, _ = self._evaluate(_u, _l, x0, up, P=parameters, hessian=False)
+                _s = np.maximum(0, _g)
+                
+                # Evaluate merit function at relaxed step
+                phi = float(self.f_phi(_u, _l, _s, _q, _G, _g, 1.0, x0, up, parameters))
+                R = (1-self.sigma*1.0)*np.amax(self.nms_memory)
+                if self.verbose: self.print_method(f'- merit: {phi:.3E} | reference: {R:.3E}')
+                if phi <= R:
+                    if self.verbose: self.print_method(f'- Decrease condition met')
+                    u = _u
+                    l = _l
+                else:
+                    if self.verbose: self.print_method(f'- Decrease condition not met')
+                    if self.checkpoint_index <= len(iter_data) - 1:
+                        if self.verbose: self.print_method(f'- Returning to checkpoint iterate {self.checkpoint_index}')
+                        # Watchdog: reset to last checkpoint and enforce descent via line search
+                        _data.watchdog = True
+                        u, du, l, dl, s, ds, mu, _data = self.load_checkpoint(iter_data, self.checkpoint_index, _data)
+
+                        # Reset delta to checkpoint delta
+                        self.delta = copy.copy(self.checkpoint_delta)
+                        # Reset regularization
+                        self.reg = copy.copy(self.checkpoint_reg)
+
+                    u, l, _a, phi = self.line_search(u, du, l, dl, s, x0, up, mu, parameters)
+                    _data.step_size = copy.copy(_a)
+
+                # Convergence via relative tolerance
+                # if np.linalg.norm(u-u_im1) < xtol/2 and np.linalg.norm(l-l_im1) < ltol/2:
+                if np.linalg.norm(u-u_im1) < xtol and np.linalg.norm(l-l_im1) < ltol:
+                    rel_tol_its += 1
+                    if rel_tol_its >= self.rel_tol_req and _data.primal_feasibility < xtol:
+                        sqp_converged = True
+                        finished = True
+                        msg = 'conv_rel_tol'
+                        if self.verbose: self.print_method('SQP converged via relative tolerance')
+                else:
+                    rel_tol_its = 0
+
+                u_im1 = copy.copy(u)
+                l_im1 = copy.copy(l)
+                
+                # Regularization decay
+                self.reg = self.reg * self.reg_decay
+                
+                self.nms_memory.append(phi)
+                self.checkpoint_counter = 0
+                self.checkpoint_delta = copy.copy(self.delta)
+                self.checkpoint_reg = copy.copy(self.reg)
+                self.checkpoint_index = sqp_it + 1
+                
+                if self.verbose:
+                    self.print_method(f'- New checkpoint at iteration {self.checkpoint_index}')
+                    self.print_method(f'- Merit memory: {str(self.nms_memory)}')
+
+            if (not d_step) and (not m_step):
+                u, l, _a, phi = self.line_search(u, du, l, dl, s, x0, up, mu, parameters)
+                _data.step_size = copy.copy(_a)
+                # Convergence via relative tolerance
+                if np.linalg.norm(u-u_im1) < xtol and np.linalg.norm(l-l_im1) < ltol:
+                    rel_tol_its += 1
+                    if rel_tol_its >= self.rel_tol_req and _data.primal_feasibility < xtol:
+                        sqp_converged = True
+                        finished = True
+                        msg = 'conv_rel_tol'
+                        if self.verbose: self.print_method('SQP converged via relative tolerance')
+                else:
+                    rel_tol_its = 0
+
+                u_im1 = copy.copy(u)
+                l_im1 = copy.copy(l)
+
+                # Regularization decay
+                self.reg = self.reg * self.reg_decay
+                    
+                self.nms_memory.append(phi)
+
+                if self.verbose:
+                    self.print_method(f'- Merit memory: {str(self.nms_memory)}')
+
+            _data.qp_solutions = qp_solves
+            _data.iteration_time = time.time() - sqp_it_start
+            if self.verbose:
+                self.print_method(f'SQP iteration {sqp_it} time: {_data.iteration_time:.2f}')
+                self.print_method('===================================================')
+
+            # pdb.set_trace()
+
+            iter_data.append(_data)
             sqp_it += 1
-            if sqp_it >= self.sqp_iters:
-                msg = 'max_it'
-                sqp_converged = False
-                if self.verbose: self.print_method('Max SQP iterations reached')
-                break
-            if time.time() - solve_start > self.time_limit:
-                msg = 'time_limit'
-                sqp_converged = False
-                if self.verbose: self.print_method('Time limit reached')
-                break
         
         x_bar = np.array(self.evaluate_dynamics(u, x0)).squeeze()
         ua_bar = []
@@ -485,21 +620,31 @@ class DGSQP(AbstractSolver):
         self.u_pred = u_bar
         self.l_pred = l
 
+        J = self.f_J(u, x0, up, parameters)
+
         solve_dur = time.time() - solve_start
         self.print_method(f'Solve status: {msg}')
+        p_feas, comp, stat = iter_data[-1].primal_feasibility, iter_data[-1].complementarity, iter_data[-1].stationarity
+        self.print_method(f'Solve stats: p feas: {p_feas:.4e} | comp: {comp:.4e} | stat: {stat:.4e}')
         self.print_method(f'Solve iters: {sqp_it}')
         self.print_method(f'Solve time: {solve_dur:.2f}')
-        J = self.f_J(u, x0, up, parameters)
-        self.print_method(str(np.array(J).squeeze()))
+        self.print_method(f'Cost: {str(np.array(J).squeeze())}')
 
         solve_info['time'] = solve_dur
         solve_info['num_iters'] = sqp_it
         solve_info['status'] = sqp_converged
         solve_info['cost'] = J
-        solve_info['cond'] = cond
-        solve_info['iter_data'] = iter_data
+        if self.save_iter_data:
+            solve_info['iter_data'] = iter_data
+        else:
+            solve_info['iter_data'] = [iter_data[0], iter_data[-1]]
         solve_info['msg'] = msg
         solve_info['init'] = init
+        solve_info['primal_sol'] = u
+        solve_info['dual_sol'] = l
+        solve_info['x_pred'] = x_bar
+        solve_info['u_pred'] = u_bar
+        solve_info['conds'] = {'p_feas': p_feas, 'comp': comp, 'stat': stat}
 
         if self.debug_plot:
             plt.ioff()
@@ -511,6 +656,9 @@ class DGSQP(AbstractSolver):
         x = ca.vertcat(*self.evaluate_dynamics(u, x0))
         A = self.evaluate_jacobian_A(x, u)
         B = self.evaluate_jacobian_B(x, u)
+        if self.N == 1:
+            A = [A]
+            B = [B]
         Du_x = self.f_Du_x(*A, *B)
 
         g = ca.vertcat(*self.f_Cxu(x, u, up, P)).full().squeeze()
@@ -532,58 +680,85 @@ class DGSQP(AbstractSolver):
                 self.print_method(f'Jacobian evaluation time: {eval_time}')
             return q, H, g, x
 
-    def _hessian_approximation(self, u, l, um, lm, Bm, df, method='bfgs'):
-        eval_start = time.time()
-        if method == 'bfgs':
-            # Damped BFGS updating from Nocedal 1999 Procedure 18.2
-            s = u - um
-            d = df(u, l)
-            dm = df(um, l)
-            y = [_d.full().squeeze() - _dm.full().squeeze() for _d, _dm in zip(d, dm)]
-
-            Bs = [_Bm @ s for _Bm in Bm]
-            sBs = [np.dot(s, _Bs) for _Bs in Bs]
-            sy = [np.dot(s, _y) for _y in y]
-            t = [1 if _sy >= 0.2*_sBs else 0.8*_sBs/(_sBs-_sy) for _sy, _sBs in zip(sy, sBs)]
-            
-            r = [_t*_y + (1-_t)*_Bs for _t, _y, _Bs in zip(t, y, Bs)]
-            B = [_Bm - np.outer(_Bs, _Bs)/_sBs + np.outer(_r, _r)/np.dot(s, _r) for _Bm, _Bs, _sBs, _r in zip(Bm, Bs, sBs, r)]
-        else:
-            raise(ValueError(f'Hessian approximation method {method} not implmented'))
-        eval_time = time.time() - eval_start
-        if self.verbose:
-            self.print_method(f'Approximate Hessian evaluation time: {eval_time}')
-
-        return B
-
-    def _get_mu(self, u, du, l, dl, s, ds, Q, q, G, g):
+    def _get_mu(self, u, du, l, dl, s, ds, Q, q, G, g, x0, up, P):
         thresh = 0
-        if self.merit_function == 'stat_l1':
-            constr_vio = g - s
-            d_stat_norm = float(self.f_dstat_norm(du, l, dl, s, Q, q, G, g, 0))
-            rho = 0.5
-            
-            if d_stat_norm < 0 and np.sum(constr_vio) > thresh:
-                if self.verbose:
-                    self.print_method('Case 1: negative directional derivative with constraint violation')
-                mu = -d_stat_norm / ((1-rho)*np.sum(constr_vio))  
-            elif d_stat_norm < 0 and np.sum(constr_vio) <= thresh:
-                if self.verbose:
-                    self.print_method('Case 2: negative directional derivative no constraint violation')
-                mu = 0
-            elif d_stat_norm >= 0 and np.sum(constr_vio) > thresh:
-                if self.verbose:
-                    self.print_method('Case 3: positive directional derivative with constraint violation')
-                mu = d_stat_norm / ((1-rho)*np.sum(constr_vio))  
-            elif d_stat_norm >= 0 and np.sum(constr_vio) <= thresh:
-                if self.verbose:
-                    self.print_method('Case 4: positive directional derivative no constraint violation')
-                mu = 0
-        elif self.merit_function == 'stat':
+        d_phi_c = float(self.f_dphi_c(u, du, l, dl, s, Q, q, G, g, 0, x0, up, P))
+        constr_vio = s
+        rho = 0.5
+        
+        if d_phi_c < 0 and np.sum(constr_vio) > thresh:
+            if self.verbose:
+                self.print_method('Case 1: negative directional derivative with constraint violation')
+            mu = -d_phi_c / ((1-rho)*np.sum(constr_vio))  
+        elif d_phi_c < 0 and np.sum(constr_vio) <= thresh:
+            if self.verbose:
+                self.print_method('Case 2: negative directional derivative no constraint violation')
             mu = 0
+        elif d_phi_c >= 0 and np.sum(constr_vio) > thresh:
+            if self.verbose:
+                self.print_method('Case 3: positive directional derivative with constraint violation')
+            mu = d_phi_c / ((1-rho)*np.sum(constr_vio))  
+        elif d_phi_c >= 0 and np.sum(constr_vio) <= thresh:
+            if self.verbose:
+                self.print_method('Case 4: positive directional derivative no constraint violation')
+            mu = 0
+        if self.verbose: self.print_method(f'mu: {mu:.2f}')
         
         return mu
-        
+    
+    def load_checkpoint(self, iter_data, idx, _data):
+        checkpoint_data = iter_data[idx]
+        u = checkpoint_data.primal_iterate
+        du = checkpoint_data.primal_step
+        l = checkpoint_data.dual_iterate
+        dl = checkpoint_data.dual_step
+        s = checkpoint_data.slack_iterate
+        ds = checkpoint_data.slack_step
+        mu = checkpoint_data.merit_parameter
+        _data.primal_iterate = copy.copy(u)
+        _data.primal_step = copy.copy(du)
+        _data.dual_iterate = copy.copy(l)
+        _data.dual_step = copy.copy(dl)
+        _data.slack_iterate = copy.copy(s)
+        _data.slack_step = copy.copy(ds)
+        _data.merit_parameter = copy.copy(mu)
+        if self.save_qp_data:
+            _data.qp = copy.copy(checkpoint_data.qp)
+        return u, du, l, dl, s, ds, mu, _data
+    
+    def line_search(self, u, du, l, dl, s, x0, up, mu, P):
+        # Define decrease condition
+        if self.merit_decrease_condition == 'max':
+            decrease_condition = lambda alpha: (1-self.sigma*alpha)*np.amax(self.nms_memory)
+        elif self.merit_decrease_condition == 'armijo':
+            _Q, _q, _G, _g, _ = self._evaluate(u, l, x0, up, P=P, hessian=True)
+            _phi = float(self.f_phi(u, l, s, _q, _G, _g, mu, x0, up, P))
+            _dphi = float(self.f_dphi(u, du, l, dl, np.maximum(0, _g), _Q, _q, _G, _g, mu, x0, up, P))
+            decrease_condition = lambda alpha: _phi + self.sigma*alpha*_dphi
+
+        # Do backtracking line search
+        if self.verbose: self.print_method(f'- Performing backtracking line search')
+        _a = 1.0
+        for i in range(self.line_search_iters):
+            _u = u + _a*du
+            _l = l + _a*dl
+            _q, _G, _g, _ = self._evaluate(_u, _l, x0, up, P=P, hessian=False)
+            _s = np.maximum(0, _g)
+
+            # Evaluate merit function at reduced step
+            phi = float(self.f_phi(_u, _l, _s, _q, _G, _g, mu, x0, up, P))
+            R = decrease_condition(_a)
+            if self.verbose:
+                self.print_method(f'-- Line search step: {i} | merit : {phi:.3e} | reference: {R:.3e} | a: {_a:.3e}')
+            # Check decrease condition
+            if phi <= R:
+                if self.verbose: self.print_method(f'- Decrease condition met')
+                break
+            else:
+                _a *= self.tau
+        phi = float(self.f_phi(_u, _l, _s, _q, _G, _g, 1.0, x0, up, P))
+        return _u, _l, _a, phi
+
     def _build_solver(self):
         # u_0, ..., u_N-1, u_-1
         u_ph = [[self.ca_sym(f'u_{a}_ph_{k}', self.joint_dynamics.dynamics_models[a].n_u) for k in range(self.N+1)] for a in range(self.M)] # Agent inputs
@@ -652,18 +827,17 @@ class DGSQP(AbstractSolver):
         Du_x_ph = self.ca_sym('Du_x', Du_x.sparsity())
 
         # Agent cost functions
-        # J = [ca.DM.zeros(1) for _ in range(self.M)]
         J = [[] for _ in range(self.M)]
         for a in range(self.M):
             for k in range(self.N):
-                if self.costs_sym[a][k].n_in == 4:
+                if self.costs_sym[a][k].n_in() == 4:
                     pJa_k = self.ca_sym(f'pJ{a}_{k}', self.costs_sym[a][k].numel_in(3))
                     J[a].append(self.costs_sym[a][k](x_ph[k], u_ph[a][k], u_ph[a][k-1], pJa_k))
                     agent_cost_params[a].append(pJa_k)
                 else:
                     J[a].append(self.costs_sym[a][k](x_ph[k], u_ph[a][k], u_ph[a][k-1]))
-            if self.costs_sym[a][-1].n_in == 2:
-                pJa_k = self.ca_sym(f'pJ{a}_{self.N}', self.costs_sym[a][k].numel_in(1))
+            if self.costs_sym[a][-1].n_in() == 2:
+                pJa_k = self.ca_sym(f'pJ{a}_{self.N}', self.costs_sym[a][-1].numel_in(1))
                 J[a].append(self.costs_sym[a][-1](x_ph[-1], pJa_k))
                 agent_cost_params[a].append(pJa_k)
             else:
@@ -725,6 +899,9 @@ class DGSQP(AbstractSolver):
             Duu_Ja = ca.horzcat(*[Duu_Q[-1][:,self.ua_idxs[a]] for a in range(self.M)])
             Duu_Ja = ca.vertcat(*[Duu_Ja[self.ua_idxs[a],:] for a in range(self.M)])
             Duu_J.append(Duu_Ja)
+
+        # Duu_J2 = [ca.jacobian(ca.jacobian(Ju[a], ca.vertcat(*ua_ph)), ca.vertcat(*ua_ph)) for a in range(self.M)]
+        # self.f_Duu_J2 = ca.Function('f_Duu_J2', [ca.vertcat(*ua_ph), xr_ph[0], uk_ph[-1]], Duu_J2)
 
         # Placeholders for gradient of dynamics w.r.t. state and input
         Cs = [[] for _ in range(self.N+1)] # Shared constraints
@@ -799,6 +976,8 @@ class DGSQP(AbstractSolver):
                 self.n_ca[a][-1] = Ca[a][-1].shape[0]
             else:
                 Ca[a][-1] = ca.DM()
+        # self.f_Cs = ca.Function('f_Cs', [ca.vertcat(*ua_ph), ca.vertcat(*x_ph), uk_ph[-1]], Cs)
+        # self.f_Ca = [ca.Function(f'f_Ca{a}', [ca.vertcat(*ua_ph), ca.vertcat(*x_ph), uk_ph[-1]], Ca[a]) for a in range(self.M)]
 
         # Joint constraint functions for both agents: C(x, u) <= 0
         C = [[] for _ in range(self.N+1)]
@@ -885,6 +1064,8 @@ class DGSQP(AbstractSolver):
         P += shared_constraint_params
         P = ca.vertcat(*P)
 
+        n = self.N*self.n_u
+        
         # Cost function in sparse form
         self.f_Jxu = ca.Function('f_Jxu', [ca.vertcat(*x_ph), ca.vertcat(*ua_ph), uk_ph[-1], P], [ca.sum1(ca.vertcat(*J[a])) for a in range(self.M)])
         
@@ -897,7 +1078,7 @@ class DGSQP(AbstractSolver):
         
         q = ca.vertcat(*[Du_J[a][a] for a in range(self.M)])
         self.f_q = ca.Function('f_q', [ca.vertcat(*x_ph), ca.vertcat(*ua_ph), uk_ph[-1], Du_x_ph, P], [q], self.options)
-
+        
         # Second derivatives of cost function w.r.t. input sequence
         in_args = [ca.vertcat(*x_ph), ca.vertcat(*ua_ph), uk_ph[-1]] \
                     + A_ph + B_ph \
@@ -931,20 +1112,15 @@ class DGSQP(AbstractSolver):
 
         # Hessian of the Lagrangian
         Q = ca.vertcat(*[Duu_J[a][int(np.sum(self.num_ua_el[:a])):int(np.sum(self.num_ua_el[:a+1])),:] for a in range(self.M)]) + lDuu_C
-        self.f_Q = ca.Function('f_Q', in_args, [Q])
+        # self.f_Q = ca.Function('f_Q', in_args, [Q])
+        self.f_Q = ca.Function('f_Q', in_args, [(Q + Q.T)/2])
 
         # Symbolic Hessian of Lagrangian
         L = [Ju[a] + ca.dot(l_ph, ca.vertcat(*Cu)) for a in range(self.M)]
         Du_L = [ca.jacobian(L[a], ca.vertcat(*ua_ph)).T for a in range(self.M)]
         self.f_Du_L = ca.Function('f_Du_L', [ca.vertcat(*ua_ph), l_ph, xr_ph[0], uk_ph[-1], P], Du_L)
-        Duu_L = [ca.jacobian(Du_L[a], ca.vertcat(*ua_ph)) for a in range(self.M)]
+        Duu_L = [ca.jacobian(Du_L[a], ca.vertcat(*ua_ph))[int(np.sum(self.num_ua_el[:a])):int(np.sum(self.num_ua_el[:a+1])),:] for a in range(self.M)]
         self.f_Duu_L = ca.Function('f_Duu_L', [ca.vertcat(*ua_ph), l_ph, xr_ph[0], uk_ph[-1], P], Duu_L)
-
-        DuL = [ca.jacobian(L[a], ca.vertcat(*u_ph[a][:-1])).T for a in range(self.M)]
-        F = ca.vertcat(*DuL, *Cu)
-        self.F = ca.Function('F', [ca.vertcat(*ua_ph, l_ph), xr_ph[0], uk_ph[-1], P], [F])
-        J = ca.jacobian(F, ca.vertcat(*ua_ph, l_ph))
-        self.J = ca.Function('J', [ca.vertcat(*ua_ph, l_ph), xr_ph[0], uk_ph[-1], P], [J])
 
         # Merit function
         du_ph = [[self.ca_sym(f'du_{a}_ph_{k}', self.joint_dynamics.dynamics_models[a].n_u) for k in range(self.N)] for a in range(self.M)] # Agent inputs
@@ -959,24 +1135,60 @@ class DGSQP(AbstractSolver):
         g_ph = self.ca_sym('g_ph', np.sum(self.n_c))
         H_ph = self.ca_sym('H_ph', Du_C.sparsity())
 
-        stat = ca.vertcat(q_ph + H_ph.T @ l_ph, ca.dot(l_ph, g_ph))
-        stat_norm = (1/2)*ca.sumsqr(stat)
-        dstat_norm = (q_ph + H_ph.T @ l_ph).T @ ca.horzcat(Q_ph, H_ph.T) @ ca.vertcat(*dua_ph, dl_ph) \
-                        + ca.dot(l_ph, g_ph)*(l_ph.T @ H_ph @ ca.vertcat(*dua_ph) + ca.dot(dl_ph, g_ph))
-        vio = mu_ph*ca.sum1(g_ph-s_ph)
-        dvio = -mu_ph*ca.sum1(g_ph-s_ph)
+        # stat = ca.vertcat(q_ph + H_ph.T @ l_ph, ca.dot(l_ph, g_ph))
+        # stat_norm = (1/2)*ca.sumsqr(stat)
+        # dstat_norm = (q_ph + H_ph.T @ l_ph).T @ ca.horzcat(Q_ph, H_ph.T) @ ca.vertcat(*dua_ph, dl_ph) \
+        #                 + ca.dot(l_ph, g_ph)*(l_ph.T @ H_ph @ ca.vertcat(*dua_ph) + ca.dot(dl_ph, g_ph))
 
-        phi_args = [l_ph, s_ph, q_ph, H_ph, g_ph, mu_ph]
-        dphi_args = [ca.vertcat(*dua_ph), l_ph, dl_ph, s_ph, Q_ph, q_ph, H_ph, g_ph, mu_ph]
+        stat = ca.vertcat(*[ca.jacobian(L[a], ua_ph[a]).T for a in range(self.M)])
+        stat_norm = (1/2)*ca.sumsqr(stat)
+        dstat_norm = ca.dot(ca.jacobian(stat_norm, ca.vertcat(*ua_ph, l_ph)).T, ca.vertcat(*dua_ph, dl_ph))
+        
+        vio = mu_ph*ca.sum1(s_ph)
+        dvio = -mu_ph*ca.sum1(s_ph)
+
+        obj = ca.sum1(ca.vertcat(*Ju))
+        dobj = ca.dot(ca.jacobian(obj, ca.vertcat(*ua_ph)).T, ca.vertcat(*dua_ph))
+
+        # phi_args = [l_ph, s_ph, q_ph, H_ph, g_ph, mu_ph]
+        # dphi_args = [ca.vertcat(*dua_ph), l_ph, dl_ph, s_ph, Q_ph, q_ph, H_ph, g_ph, mu_ph]
+        phi_args = [ca.vertcat(*ua_ph), l_ph, s_ph, q_ph, H_ph, g_ph, mu_ph, xr_ph[0], uk_ph[-1], P]
+        dphi_args = [ca.vertcat(*ua_ph), ca.vertcat(*dua_ph), l_ph, dl_ph, s_ph, Q_ph, q_ph, H_ph, g_ph, mu_ph, xr_ph[0], uk_ph[-1], P]
         if self.merit_function == 'stat_l1':
             self.f_phi = ca.Function('f_phi', phi_args, [stat_norm + vio], self.options)
             self.f_dphi = ca.Function('f_dphi', dphi_args, [dstat_norm + dvio], self.options)
-        elif self.merit_function == 'stat':
-            self.f_phi = ca.Function('f_phi', phi_args, [stat_norm], self.options)
-            self.f_dphi = ca.Function('f_dphi', dphi_args, [dstat_norm], self.options)
+            self.f_dphi_c = ca.Function('f_dphi_c', dphi_args, [dstat_norm], self.options)
+        elif self.merit_function == 'sum_obj_l1':
+            self.f_phi = ca.Function('f_phi', phi_args, [obj + vio], self.options)
+            self.f_dphi = ca.Function('f_dphi', dphi_args, [dobj + dvio], self.options)
+            self.f_dphi_c = ca.Function('f_dphi_c', dphi_args, [dobj], self.options)
         else:
             raise(ValueError(f'Merit function option {self.merit_function} not recognized'))
         self.f_dstat_norm = ca.Function('f_dstat_norm', dphi_args, [dstat_norm], self.options)
+
+        # Elastic mode
+        _q = self.ca_sym('_q', self.n_u*self.N)
+        eta_ph = self.ca_sym('eta', 1)
+        qem = ca.vertcat(_q, eta_ph*ca.DM.ones(np.sum(self.n_c)))
+        self.f_qem = ca.Function('f_q', [_q, eta_ph], [qem], self.options)
+
+        _Q = self.ca_sym('_Q', self.f_Q.sparsity_out(0))
+        rho_ph = self.ca_sym('rho', 1)
+        Qem = self.ca_sym('Qem', ca.Sparsity(n+np.sum(self.n_c), n+np.sum(self.n_c)))
+        Qem[:n,:n] = _Q
+        Qem[n:,n:] = rho_ph*ca.DM.eye(np.sum(self.n_c))
+        self.f_Qem = ca.Function('f_Qem', [_Q, rho_ph], [Qem])
+        
+        _g = self.ca_sym('_g', np.sum(self.n_c))
+        gem = ca.vertcat(_g, ca.DM.zeros(np.sum(self.n_c)))
+        self.f_gem = ca.Function('f_gem', [_g], [gem], self.options)
+
+        _G = self.ca_sym('_G', self.f_Du_C.sparsity_out(0))
+        Du_Cem = self.ca_sym('Du_Cem', ca.Sparsity(2*np.sum(self.n_c), n+np.sum(self.n_c)))
+        Du_Cem[:np.sum(self.n_c),:n] = _G
+        Du_Cem[:np.sum(self.n_c),n:] = -ca.DM.eye(np.sum(self.n_c))
+        Du_Cem[np.sum(self.n_c):,n:] = -ca.DM.eye(np.sum(self.n_c))
+        self.f_Du_Cem = ca.Function('f_Du_Cem', [_G], [Du_Cem], self.options)
 
         # Casadi C code generation
         if self.code_gen and not self.jit:
@@ -1054,244 +1266,11 @@ class DGSQP(AbstractSolver):
         self.f_dphi = ca.external('f_dphi', solver_path)
         self.f_dstat_norm = ca.external('f_dstat_norm', solver_path)
 
-    def _line_search_3(self, u, du, l, dl, s, ds, Q, q, G, g, evaluate, merit, d_merit):
-        phi = merit(u, l, s, q, G, g)
-        dphi = d_merit(u, du, l, dl, s, ds, Q, q, G, g)
-        if dphi > 0:
-            if self.verbose:
-                self.print_method(f'- Line search directional derivative is positive: {dphi}')
-        alpha, conv = 1.0, False
-        for i in range(self.line_search_iters):
-            u_trial = u + alpha*du
-            l_trial = l + alpha*dl
-            s_trial = s + alpha*ds
-            q_trial, G_trial, g_trial, _ = evaluate(u_trial, l_trial, False)
-            phi_trial = merit(u_trial, l_trial, s_trial, q_trial, G_trial, g_trial)
-            if self.verbose:
-                self.print_method(f'- Line search iteration: {i} | merit gap: {phi_trial-(phi + self.beta*alpha*dphi):.4e} | a: {alpha:.4e}')
-            if phi_trial <= phi + self.beta*alpha*dphi:
-                conv = True
-                break
-            else:
-                alpha *= self.tau
-        if not conv:
-            if self.verbose:
-                self.print_method('- Max iterations reached, line search did not succeed')
-            # pdb.set_trace()
-        return u_trial, l_trial, phi_trial
-
-    def _watchdog_line_search_3(self, u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k, evaluate, merit, d_merit):
-        if self.verbose:
-            self.print_method('===================================================')
-            self.print_method('Watchdog step acceptance routine')
-        qp_solves = 0
-        t_hat = 7 # Number of steps where we search for sufficient merit decrease
-        phi_log = []
-
-        phi_k = merit(u_k, l_k, s_k, q_k, G_k, g_k)
-        phi_log.append(phi_k)
-        dphi_k = d_merit(u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k)
-        if dphi_k > 0:
-            if self.verbose:
-                self.print_method(f'Time k: Directional derivative is positive: {dphi_k}')
-
-        # Take relaxed (full) step
-        u_kp1 = u_k + du_k
-        l_kp1 = l_k + dl_k
-        s_kp1 = s_k + ds_k
-        q_kp1, G_kp1, g_kp1, _ = evaluate(u_kp1, l_kp1, False)
-        phi_kp1 = merit(u_kp1, l_kp1, s_kp1, q_kp1, G_kp1, g_kp1)
-        phi_log.append(phi_kp1)
-
-        # Check for sufficient decrease w.r.t. time k
-        if self.verbose:
-            self.print_method(f'Time k+1:')
-        if phi_kp1 <= phi_k + self.beta*dphi_k:
-            if self.verbose:
-                self.print_method(f'Sufficient decrease achieved')
-            return u_kp1, l_kp1, qp_solves
-        if self.verbose:
-            self.print_method(f'Insufficient decrease in merit')
-
-        # Check for sufficient decrease in the next t_hat iterations
-        u_t, l_t, phi_t = u_kp1, l_kp1, phi_kp1
-        for t in range(t_hat):
-            if self.verbose:
-                self.print_method(f'Time k+{t+2}:')
-            # Compute step at iteration t
-            Q_t, q_t, G_t, g_t, _ = evaluate(u_t, l_t, True)
-            du_t, l_hat = self._solve_qp(Q_t, q_t, G_t, g_t)
-            qp_solves += 1
-            if None in du_t:
-                if self.verbose:
-                    self.print_method(f'QP failed, returning to search along step at iteration k')
-                u_kp1, l_kp1, phi_kp1 = self._line_search_3(u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k, evaluate, merit, d_merit)
-                return u_kp1, l_kp1, qp_solves
-            dl_t = l_hat - l_t
-
-            s_t = np.minimum(0, g_t)
-            ds_t = g_t + G_t @ du_t - s_t
-
-            # Do line search
-            u_tp1, l_tp1, phi_tp1 = self._line_search_3(u_t, du_t, l_t, dl_t, s_t, ds_t, Q_t, q_t, G_t, g_t, evaluate, merit, d_merit)
-            phi_log.append(phi_tp1)
-            if self.verbose:
-                self.print_method(phi_log)
-            
-            # Check for sufficient decrease w.r.t. base iteration
-            if phi_t <= phi_k or phi_tp1 <= phi_k + self.beta*dphi_k:
-                if self.verbose:
-                    self.print_method(f'Sufficient decrease achieved')
-                return u_tp1, l_tp1, qp_solves
-            
-            # Update for next iteration
-            u_t, l_t, phi_t = u_tp1, l_tp1, phi_tp1
-        
-        if phi_tp1 > phi_k:
-            if self.verbose:
-                self.print_method(f'No decrease in merit, returning to search along step at iteration k')
-            u_kp1, l_kp1, phi_kp1 = self._line_search_3(u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k, evaluate, merit, d_merit)
-            return u_kp1, l_kp1, qp_solves
-        else:
-            if self.verbose:
-                self.print_method(f'Insufficient decrease in merit')
-            Q_tp1, q_tp1, G_tp1, g_tp1, _ = evaluate(u_tp1, l_tp1, True)
-            du_tp1, l_hat = self._solve_qp(Q_tp1, q_tp1, G_tp1, g_tp1)
-            if None in du_tp1:
-                if self.verbose:
-                    self.print_method(f'QP failed, returning to search along step at time k')
-                u_kp1, l_kp1, phi_kp1 = self._line_search_3(u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k, evaluate, merit, d_merit)
-                return u_kp1, l_kp1, qp_solves
-            qp_solves += 1
-            dl_tp1 = l_hat - l_tp1
-
-            s_tp1 = np.minimum(0, g_tp1)
-            ds_tp1 = g_tp1 + G_tp1 @ du_tp1 - s_tp1
-
-            u_tp2, l_tp2, phi_tp2 = self._line_search_3(u_tp1, du_tp1, l_tp1, dl_tp1, s_tp1, ds_tp1, Q_tp1, q_tp1, G_tp1, g_tp1, evaluate, merit, d_merit)
-            return u_tp2, l_tp2, qp_solves
-
-    def _watchdog_line_search_4(self, u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k, evaluate, merit, d_merit, merit_max=1e6):
-        if self.verbose:
-            self.print_method('===================================================')
-            self.print_method('Watchdog step acceptance routine')
-        qp_solves = 0
-        t_hat = 5 # Number of steps where we search for sufficient merit decrease
-        phi_log = []
-
-        phi_k = merit(u_k, l_k, s_k, q_k, G_k, g_k)
-        phi_log.append(phi_k)
-        dphi_k = d_merit(u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k)
-        if dphi_k > 0:
-            if self.verbose:
-                self.print_method(f'Time k: Directional derivative is positive: {dphi_k}')
-
-        # Take relaxed (full) step
-        u_kp1 = u_k + du_k
-        l_kp1 = l_k + dl_k
-        s_kp1 = s_k + ds_k
-        q_kp1, G_kp1, g_kp1, _ = evaluate(u_kp1, l_kp1, False)
-        phi_kp1 = merit(u_kp1, l_kp1, s_kp1, q_kp1, G_kp1, g_kp1)
-        phi_log.append(phi_kp1)
-
-        # Check for sufficient decrease w.r.t. time k
-        if self.verbose:
-            self.print_method(f'Time k+1:')
-        if phi_kp1 <= phi_k + self.beta*dphi_k:
-            if self.verbose:
-                self.print_method(f'Sufficient decrease achieved')
-            return u_kp1, l_kp1, qp_solves
-        # if self.verbose:
-        #     self.print_method(f'Insufficient decrease in merit')
-
-        start_time = time.time()
-        fail = False
-        # Check for sufficient decrease in the next t_hat iterations
-        u_t, l_t = u_kp1, l_kp1
-        for t in range(t_hat):
-            if self.verbose:
-                self.print_method(f'Time k+{t+2}:')
-            # Compute step at iteration t
-            Q_t, q_t, G_t, g_t, _ = evaluate(u_t, l_t, True)
-            du_t, l_hat = self._solve_qp(Q_t, q_t, G_t, g_t)
-            qp_solves += 1
-            if None in du_t:
-                fail = True
-                break
-            dl_t = l_hat - l_t
-            s_t = np.minimum(0, g_t)
-            ds_t = g_t + G_t @ du_t - s_t
-
-            # Take full step
-            u_tp1 = u_t + du_t
-            l_tp1 = l_hat
-            s_tp1 = s_t + ds_t
-            q_tp1, G_tp1, g_tp1, _ = evaluate(u_tp1, l_tp1, False)
-            phi_tp1 = merit(u_tp1, l_tp1, s_tp1, q_tp1, G_tp1, g_tp1)
-            phi_log.append(phi_tp1)
-            if self.verbose:
-                self.print_method(phi_log)
-            if phi_tp1 > merit_max: break
-            
-            # Check for sufficient decrease w.r.t. base iteration
-            if phi_tp1 <= phi_k + self.beta*dphi_k:
-                if self.verbose:
-                    self.print_method(f'Sufficient decrease achieved')
-                return u_tp1, l_tp1, qp_solves
-            
-            # Update for next iteration
-            u_t, l_t = u_tp1, l_tp1
-
-            if time.time() - start_time > self.time_limit:
-                fail = True
-                break
-        
-        # Insist on merit function decrease
-        Q_t, q_t, G_t, g_t, _ = evaluate(u_t, l_t, True)
-        du_t, l_hat = self._solve_qp(Q_t, q_t, G_t, g_t)
-        qp_solves += 1
-        if None in du_t:
-            fail = True
-        else:
-            dl_t = l_hat - l_t
-            s_t = np.minimum(0, g_t)
-            ds_t = g_t + G_t @ du_t - s_t
-            u_tp1, l_tp1, phi_tp1 = self._line_search_3(u_t, du_t, l_t, dl_t, s_t, ds_t, Q_t, q_t, G_t, g_t, evaluate, merit, d_merit)
-
-        if not fail:
-            if phi_tp1 <= phi_k + self.beta*dphi_k:
-                return u_tp1, l_tp1, qp_solves
-            elif phi_tp1 > phi_k:
-                fail = True
-            else:
-                if self.verbose:
-                    self.print_method(f'Insufficient decrease in merit')
-                Q_tp1, q_tp1, G_tp1, g_tp1, _ = evaluate(u_tp1, l_tp1, True)
-                du_tp1, l_hat = self._solve_qp(Q_tp1, q_tp1, G_tp1, g_tp1)
-                if None in du_tp1:
-                    if self.verbose:
-                        self.print_method(f'QP failed, returning to search along step at time k')
-                    u_kp1, l_kp1, phi_kp1 = self._line_search_3(u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k, evaluate, merit, d_merit)
-                    return u_kp1, l_kp1, qp_solves
-                qp_solves += 1
-                dl_tp1 = l_hat - l_tp1
-                s_tp1 = np.minimum(0, g_tp1)
-                ds_tp1 = g_tp1 + G_tp1 @ du_tp1 - s_tp1
-
-                u_tp2, l_tp2, _ = self._line_search_3(u_tp1, du_tp1, l_tp1, dl_tp1, s_tp1, ds_tp1, Q_tp1, q_tp1, G_tp1, g_tp1, evaluate, merit, d_merit)
-                return u_tp2, l_tp2, qp_solves
-
-        if fail:
-            if self.verbose:
-                self.print_method(f'No decrease in merit, returning to search along step at iteration k')
-            u_kp1, l_kp1, phi_kp1 = self._line_search_3(u_k, du_k, l_k, dl_k, s_k, ds_k, Q_k, q_k, G_k, g_k, evaluate, merit, d_merit)
-            return u_kp1, l_kp1, qp_solves
-
-    def _nearestPD(self, A):
+    def _nearest_pd(self, A):
         B = (A + A.T)/2
         s, U = np.linalg.eigh(B)
         # s[np.where(s < 0)[0]] = 0
-        s[np.where(s < 0)[0]] = 1e-10
+        s[np.where(s < 0)[0]] = 1e-9
         C = U @ np.diag(s) @ U.T
         return (C + C.T)/2
 
@@ -1307,21 +1286,34 @@ class DGSQP(AbstractSolver):
             for i in range(self.M):
                 self.l_xy[i].set_data(q_bar[:,0+int(np.sum(self.num_qa_d[:i]))], q_bar[:,1+int(np.sum(self.num_qa_d[:i]))])
         else:
-            raise NotImplementedError('Conversion from local to global pos has not been implemented for debug plot')
+            for i in range(self.M):
+                if i < self.M-1:
+                    idx = int(np.sum(self.num_qa_d[i+1:]))
+                else:
+                    idx = 0
+                s = q_bar[:,-2-idx]
+                ey = q_bar[:,-1-idx]
+                x, y = [], []
+                for _s, _ey in zip(s, ey):
+                    _x, _y, _ = self.joint_dynamics.dynamics_models[0].track.local_to_global((_s, _ey, 0))
+                    x.append(_x)
+                    y.append(_y)
+                self.l_xy[i].set_data(x, y)
         self.ax_xy.set_aspect('equal')
         self.ax_xy.relim()
         self.ax_xy.autoscale_view()
         J = self.f_J(u, x0, up, P)
-        self.ax_xy.set_title(str(J))
+        self.ax_xy.set_title(f'{self.solver_name} | {str(J)}  | {self.reg:.3f}')
         for i in range(self.M):
-            self.l_a[i].set_data(np.arange(self.N), u_bar[:,0+int(np.sum(self.num_ua_d[:i]))])
-            self.l_s[i].set_data(np.arange(self.N), u_bar[:,1+int(np.sum(self.num_ua_d[:i]))])
-        self.ax_a.relim()
-        self.ax_a.autoscale_view()
-        self.ax_s.relim()
-        self.ax_s.autoscale_view()
+            for j in range(self.num_qa_d[i]):
+                _q =  q_bar[:,j+int(np.sum(self.num_qa_d[:i]))]
+                self.l_q[i][j].set_data(np.arange(self.N+1), _q)
+                self.ax_q[i][j].relim()
+                self.ax_q[i][j].autoscale_view()
+            for j in range(self.num_ua_d[i]):
+                _u = u_bar[:,j+int(np.sum(self.num_ua_d[:i]))]
+                self.l_u[i][j].set_data(np.arange(self.N), _u)
+                self.ax_u[i][j].relim()
+                self.ax_u[i][j].autoscale_view()
         self.fig.canvas.draw()
         self.fig.canvas.flush_events()
-
-if __name__ == '__main__':
-    pass
