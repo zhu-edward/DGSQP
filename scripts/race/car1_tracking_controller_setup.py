@@ -67,7 +67,8 @@ mpc_params = CALTVMPCParams(N=N,
                             damping=0.75,
                             qp_iters=2,
                             delay=None,
-                            verbose=False)
+                            verbose=False,
+                            qp_interface='casadi')
 
 # Symbolic placeholder variables
 sym_q = ca.MX.sym('q', dyn_model.n_q)
@@ -112,6 +113,5 @@ mpc_controller = CA_LTV_MPC(dyn_model,
                                 sym_costs, 
                                 sym_constrs, 
                                 {'qu_ub': state_input_ub, 'qu_lb': state_input_lb, 'du_ub': input_rate_ub, 'du_lb': input_rate_lb},
-                                mpc_params,
-                                qp_interface='casadi')
+                                mpc_params)
 

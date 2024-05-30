@@ -109,6 +109,17 @@ class DGSQPParams(ControllerConfig):
 
     solver_name: str        = field(default='DGSQP')
     time_limit: float       = field(default=None)
+    qp_interface: str       = field(default='casadi')
+    qp_solver: str          = field(default='osqp')
+    conv_approx: bool       = field(default=True)
+    hessian_approximation: str = field(default='none')
+
+    code_gen: bool          = field(default=False)
+    jit: bool               = field(default=False)
+    opt_flag: str           = field(default='O0')
+    enable_jacobians: bool  = field(default=True)
+    solver_dir: str         = field(default=None)
+    so_name: str            = field(default=None)
 
     debug: bool             = field(default=False)
     debug_plot: bool        = field(default=False)

@@ -16,7 +16,7 @@ class ModelConfig(PythonMsg):
     jit: bool                       = field(default = True)
     opt_flag: str                   = field(default = 'O0')
     install: bool                   = field(default = True)
-    install_dir: str                = field(default = '~/.mpclab_common/models')
+    install_dir: str                = field(default = '~/.dgsqp_models')
 
 @dataclass
 class DynamicsConfig(ModelConfig):

@@ -243,7 +243,7 @@ car1_u_ws = 0.01*np.ones((car1_N+1, car1_tracking_controller.dynamics.n_u))
 car1_du_ws = np.zeros((car1_N, car1_tracking_controller.dynamics.n_u))
 
 P = np.append(car1_q_ref.ravel(), np.tile(obs_p, car1_N))
-car1_tracking_controller.set_warm_start(car1_u_ws, car1_du_ws, state=car1_sim_state, params=P)
+car1_tracking_controller.set_warm_start(car1_u_ws, car1_du_ws, state=car1_sim_state, parameters=P)
 
 car2_t = car2_s2t(car2_sim_state.p.s)
 car2_t_ref = car2_t + control_dt*np.arange(car2_N+1)
@@ -253,7 +253,7 @@ car2_u_ws = 0.01*np.ones((car2_N+1, car2_tracking_controller.dynamics.n_u))
 car2_du_ws = np.zeros((car2_N, car2_tracking_controller.dynamics.n_u))
 
 P = np.append(car2_q_ref.ravel(), np.tile(obs_p, car2_N))
-car2_tracking_controller.set_warm_start(car2_u_ws, car2_du_ws, state=car2_sim_state, params=P)
+car2_tracking_controller.set_warm_start(car2_u_ws, car2_du_ws, state=car2_sim_state, parameters=P)
 
 if plot:
     car1_l_ref.set_data(car1_q_ref[:,0], car1_q_ref[:,1])
@@ -439,7 +439,7 @@ while True:
     st = time.time()
     car2_p = car2_tracking_controller.q_pred[1:,:2].ravel()
     P = np.append(car1_q_ref.ravel(), car2_p)
-    car1_tracking_controller.step(car1_state, params=P)
+    car1_tracking_controller.step(car1_state, parameters=P)
     car1_pred = car1_tracking_controller.get_prediction()
     car1_pred.t = t
     car1_solve_time = time.time()-st + car1_ref_time
@@ -449,7 +449,7 @@ while True:
     st = time.time()
     car1_p = car1_tracking_controller.q_pred[1:,:2].ravel()
     P = np.append(car2_q_ref.ravel(), car1_p)
-    car2_tracking_controller.step(car2_state, params=P)
+    car2_tracking_controller.step(car2_state, parameters=P)
     car2_pred = car2_tracking_controller.get_prediction()
     car2_pred.t = t
     car2_solve_time = time.time()-st + car2_ref_time

@@ -510,15 +510,24 @@ class CasadiKinematicUnicycleCombined(CasadiDynamicsModel):
         self.c_r    = self.model_config.rolling_resistance
         self.p_r    = self.model_config.rolling_resistance_exponent
 
+        self.use_mx = self.model_config.use_mx
+        if isinstance(self.track, CasadiBSplineTrack):
+            self.use_mx = True
+
+        if self.use_mx:
+            sym = ca.MX.sym
+        else:
+            sym = ca.SX.sym
+
         # symbolic variables
-        self.sym_x      = ca.SX.sym('x')
-        self.sym_y      = ca.SX.sym('y')
-        self.sym_v      = ca.SX.sym('v')
-        self.sym_epsi   = ca.SX.sym('epsi')
-        self.sym_s      = ca.SX.sym('s')
-        self.sym_xtran  = ca.SX.sym('xtran')
-        self.sym_Fx     = ca.SX.sym('Fx')
-        self.sym_wz     = ca.SX.sym('wz')
+        self.sym_x      = sym('x')
+        self.sym_y      = sym('y')
+        self.sym_v      = sym('v')
+        self.sym_epsi   = sym('epsi')
+        self.sym_s      = sym('s')
+        self.sym_xtran  = sym('xtran')
+        self.sym_Fx     = sym('Fx')
+        self.sym_wz     = sym('wz')
 
         self.sym_c = self.get_curvature(self.sym_s)
         self.sym_psi_t = self.get_tangent(self.sym_s)

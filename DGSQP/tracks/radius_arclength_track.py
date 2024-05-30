@@ -844,20 +844,3 @@ def compute_angle(point_0, point_1, point_2):
     theta = np.arctan2(det, dot)
 
     return theta
-
-if __name__ == "__main__":
-    from mpclab_common.track import get_track
-
-    track = get_track('L_track_barc')
-
-    f = track.get_progress_projection_casadi_fn()
-
-    print(f([1,0]))
-
-    p = ca.MX.sym('p', 2)
-    df = ca.Function('df', [p], [ca.jacobian(f(p), p)])
-
-    print(df([1,0]))
-
-    pdb.set_trace()
-    # surf = track.get_barc3d_surface()

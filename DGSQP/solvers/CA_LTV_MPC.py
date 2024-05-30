@@ -14,13 +14,13 @@ import shutil
 from typing import List, Dict, Tuple
 from collections import deque
 
-from mpclab_common.models.dynamics_models import CasadiDynamicsModel
-from mpclab_common.pytypes import VehicleState, VehiclePrediction
+from DGSQP.dynamics.dynamics_models import CasadiDynamicsModel
+from DGSQP.types import VehicleState, VehiclePrediction
 
-from mpclab_controllers.abstract_controller import AbstractController
-from mpclab_controllers.utils.controllerTypes import CALTVMPCParams
+from DGSQP.solvers.abstract_solver import AbstractSolver
+from DGSQP.solvers.solver_types import CALTVMPCParams
 
-class CA_LTV_MPC(AbstractController):
+class CA_LTV_MPC(AbstractSolver):
     def __init__(self, dynamics: CasadiDynamicsModel, 
                        costs: Dict[str, List[ca.Function]], 
                        constraints: Dict[str, ca.Function],
